@@ -1,0 +1,15 @@
+services:
+  wow-addon-mcp:
+    build: .
+    restart: unless-stopped
+    environment:
+      WOW_MCP_TOKEN: ${WOW_MCP_TOKEN:?Set WOW_MCP_TOKEN}
+      WOW_MCP_PUBLIC_URL: ${WOW_MCP_PUBLIC_URL:?Set WOW_MCP_PUBLIC_URL}
+      WOW_MCP_MANAGE_ANNOTATIONS: ${WOW_MCP_MANAGE_ANNOTATIONS:-true}
+    expose:
+      - "3000"
+    volumes:
+      - annotations:/data
+
+volumes:
+  annotations:

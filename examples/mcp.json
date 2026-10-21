@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "wow-addon": {
+      "command": "/absolute/path/to/bun",
+      "args": ["/absolute/path/wow-addon-skills/dist/mcp/server.js"],
+      "env": {
+        "WOW_ANNOTATIONS_ROOT": "/absolute/path/wow-annotations",
+        "WOW_FRAMEXML_ROOT": "/absolute/path/wow-framexml",
+        "WOW_RG_COMMAND": "rg"
+      }
+    }
+  }
+}

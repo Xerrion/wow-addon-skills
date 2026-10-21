@@ -1,0 +1,31 @@
+{
+  "name": "wow-addon-mcp",
+  "version": "1.0.0",
+  "description": "Local MCP tools and portable skills for World of Warcraft addon development",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "bun": ">=1.3.12"
+  },
+  "packageManager": "bun@1.3.12",
+  "bin": {
+    "wow-addon-mcp": "dist/mcp/server.js"
+  },
+  "scripts": {
+    "build": "bun run --bun tsc",
+    "start": "bun dist/mcp/server.js",
+    "start:http": "bun dist/mcp/http-server.mjs",
+    "config:http": "bun dist/mcp/http-config.mjs",
+    "check": "bun run --bun tsc --noEmit",
+    "test": "bun run build && bun test ./mcp ./tests"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/node": "^24.19.2",
+    "typescript": "~7.0.2"
+  }
+}

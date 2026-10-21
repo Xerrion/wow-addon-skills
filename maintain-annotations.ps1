@@ -10,6 +10,7 @@
 #   .\maintain-annotations.ps1                        # Update all flavors
 #   .\maintain-annotations.ps1 -Flavor live            # Update one flavor
 #   .\maintain-annotations.ps1 -Flavor live,classic_era # Update specific flavors
+#   .\maintain-annotations.ps1 -Check                 # Validate paths and repositories
 #   .\maintain-annotations.ps1 -Help                   # Show help
 #
 # PowerShell 5.1+ compatible.
@@ -20,6 +21,7 @@
 [CmdletBinding()]
 param(
     [string[]]$Flavor,
+    [switch]$Check,
     [switch]$Help
 )
 
@@ -42,8 +44,8 @@ $DataHome = if ($IsWindowsHost) {
 } else {
     Join-Path $HOME ".local/share"
 }
-$AnnotationsDir = Join-Path $DataHome "wow-annotations"
-$FrameXMLDir = Join-Path $DataHome "wow-framexml"
+$AnnotationsDir = if ($env:WOW_ANNOTATIONS_ROOT) { $env:WOW_ANNOTATIONS_ROOT } else { Join-Path $DataHome "wow-annotations" }
+$FrameXMLDir = if ($env:WOW_FRAMEXML_ROOT) { $env:WOW_FRAMEXML_ROOT } else { Join-Path $DataHome "wow-framexml" }
 $BareDir = Join-Path $FrameXMLDir ".bare"
 
 $FlavorBranches = @{
@@ -64,6 +66,7 @@ if ($Help) {
     Write-Host "Parameters:" -ForegroundColor Yellow
     Write-Host "  -Flavor <name[]>  Specific flavors to update (default: all)"
     Write-Host "                    Valid: live, classic, classic_era, classic_anniversary"
+    Write-Host "  -Check            Validate paths and repositories without changing them"
     Write-Host "  -Help             Show this help message"
     Write-Host ""
     Write-Host "Directories:" -ForegroundColor Yellow
@@ -102,6 +105,164 @@ $RequestedFlavors = if ($Flavor -and $Flavor.Count -gt 0) {
     $AllFlavors
 }
 
+function Assert-PhysicalDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+    $Current = $Path
+    while ($Current) {
+        $Item = Get-Item -LiteralPath $Current -Force -ErrorAction SilentlyContinue
+        if ($null -ne $Item) {
+            if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Annotation paths cannot contain symbolic links or junctions: $Current. Choose the physical directory."
+            }
+            if (-not $Item.PSIsContainer) {
+                throw "Annotation paths must be directories: $Current. Choose a dedicated directory."
+            }
+        }
+        $Parent = [IO.Path]::GetDirectoryName($Current)
+        if ($Parent -eq $Current) { break }
+        $Current = $Parent
+    }
+}
+
+function Get-AnnotationDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+    if ($Path -match '[\r\n\x00]') {
+        throw 'Annotation directory paths cannot contain line breaks or null characters.'
+    }
+    if (-not [IO.Path]::IsPathRooted($Path) -or
+        ($IsWindowsHost -and $Path -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)')) {
+        throw "Annotation directories must be absolute paths: $Path. Use an absolute WOW_ANNOTATIONS_ROOT or WOW_FRAMEXML_ROOT."
+    }
+    $FullPath = [IO.Path]::GetFullPath($Path)
+    $Separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $Directory = $FullPath.TrimEnd($Separators)
+    $Root = [IO.Path]::GetPathRoot($FullPath).TrimEnd($Separators)
+    $HomeDirectory = [IO.Path]::GetFullPath($HOME).TrimEnd($Separators)
+    if ($Directory -eq $Root -or $Directory -eq $HomeDirectory) {
+        throw "Choose a dedicated annotation directory instead of a filesystem root or home directory: $FullPath."
+    }
+    Assert-PhysicalDirectory -Path $Directory
+    return $Directory
+}
+
+function Test-DirectoryOverlap {
+    param(
+        [Parameter(Mandatory)][string]$First,
+        [Parameter(Mandatory)][string]$Second
+    )
+    $Comparison = if ($IsWindowsHost) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $FirstPrefix = $First.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $SecondPrefix = $Second.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    return $FirstPrefix.StartsWith($SecondPrefix, $Comparison) -or $SecondPrefix.StartsWith($FirstPrefix, $Comparison)
+}
+
+function Read-GitValue {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    $PreviousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $Value = & git @Arguments 2>$null
+        $ReadExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousPreference
+    }
+    if ($ReadExitCode -ne 0) {
+        throw "Cannot validate the annotation repository with git $($Arguments -join ' '). Choose the expected annotation repository or an empty directory."
+    }
+    return ($Value -join "`n").Trim()
+}
+
+function Assert-ExpectedOrigin {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Repository,
+        [switch]$Bare
+    )
+    $Arguments = if ($Bare) { @('--git-dir', $Path) } else { @('-C', $Path) }
+    $Origin = Read-GitValue -Arguments ($Arguments + @('remote', 'get-url', 'origin'))
+    $Expected = '^(?:https://github\.com/|ssh://git@github\.com(?::22)?/|git@github\.com:)' + [Regex]::Escape($Repository) + '(?:\.git)?/?$'
+    if ($Origin -notmatch $Expected) {
+        throw "Annotation repository $Path has origin '$Origin'. Expected github.com/$Repository. Choose an empty directory or the expected repository."
+    }
+}
+
+function Assert-WorkingRepository {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Repository,
+        [string]$Branch
+    )
+    Assert-PhysicalDirectory -Path $Path
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+    if (@(Get-ChildItem -LiteralPath $Path -Force).Count -eq 0) { return }
+    $GitMarker = Join-Path $Path '.git'
+    if (-not (Test-Path -LiteralPath $GitMarker)) {
+        throw "Annotation directory contains unrelated data: $Path. Choose an empty directory or the expected repository."
+    }
+    $MarkerItem = Get-Item -LiteralPath $GitMarker -Force
+    if ($MarkerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "The annotation Git directory is a symbolic link or junction: $GitMarker. Choose the physical repository."
+    }
+    $TopLevel = Read-GitValue -Arguments @('-C', $Path, 'rev-parse', '--show-toplevel')
+    $ExpectedTopLevel = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $ActualTopLevel = [IO.Path]::GetFullPath($TopLevel).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $Comparison = if ($IsWindowsHost) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if (-not $ActualTopLevel.Equals($ExpectedTopLevel, $Comparison)) {
+        throw "The annotation directory is inside another repository: $Path. Choose a dedicated annotation repository."
+    }
+    Assert-ExpectedOrigin -Path $Path -Repository $Repository
+    if ($Branch) {
+        $ActualBranch = Read-GitValue -Arguments @('-C', $Path, 'branch', '--show-current')
+        if ($ActualBranch -cne $Branch) {
+            throw "Annotation worktree $Path is on branch '$ActualBranch'. Expected '$Branch'. Switch to the expected branch before updating."
+        }
+    }
+}
+
+function Assert-AnnotationRepositories {
+    $RepositoryDirectory = [IO.Path]::GetFullPath($PSScriptRoot)
+    if ((Test-DirectoryOverlap -First $AnnotationsDir -Second $RepositoryDirectory) -or
+        (Test-DirectoryOverlap -First $FrameXMLDir -Second $RepositoryDirectory)) {
+        throw 'Annotation directories must be separate from this checkout and its parent directories. Choose dedicated data directories.'
+    }
+    if (Test-DirectoryOverlap -First $AnnotationsDir -Second $FrameXMLDir) {
+        throw 'WoW API and FrameXML annotation directories must be separate and cannot contain each other.'
+    }
+    Assert-WorkingRepository -Path $AnnotationsDir -Repository 'Ketho/vscode-wow-api'
+    if (Test-Path -LiteralPath $FrameXMLDir -PathType Container) {
+        $ExpectedNames = @('.bare') + $AllFlavors
+        $MetadataNames = @('.DS_Store', 'Thumbs.db', 'desktop.ini')
+        foreach ($Item in Get-ChildItem -LiteralPath $FrameXMLDir -Force) {
+            if (-not $Item.PSIsContainer -and $MetadataNames -contains $Item.Name) { continue }
+            $KnownName = if ($IsWindowsHost) { $ExpectedNames -contains $Item.Name } else { $ExpectedNames -ccontains $Item.Name }
+            if (-not $KnownName) {
+                throw "FrameXML directory contains unrelated data: $($Item.FullName). Choose an empty directory or the expected FrameXML layout."
+            }
+            Assert-PhysicalDirectory -Path $Item.FullName
+        }
+    }
+    if ((Test-Path -LiteralPath $BareDir -PathType Container) -and @(Get-ChildItem -LiteralPath $BareDir -Force).Count -gt 0) {
+        $IsBare = Read-GitValue -Arguments @('--git-dir', $BareDir, 'rev-parse', '--is-bare-repository')
+        if ($IsBare -ne 'true') {
+            throw "The FrameXML .bare directory is not a bare Git repository: $BareDir. Choose the expected repository or an empty directory."
+        }
+        Assert-ExpectedOrigin -Path $BareDir -Repository 'NumyAddon/FramexmlAnnotations' -Bare
+    }
+    foreach ($FlavorName in $RequestedFlavors) {
+        $Worktree = Join-Path $FrameXMLDir $FlavorName
+        Assert-WorkingRepository -Path $Worktree -Repository 'NumyAddon/FramexmlAnnotations' -Branch $FlavorBranches[$FlavorName]
+    }
+}
+
+$AnnotationsDir = Get-AnnotationDirectory -Path $AnnotationsDir
+$FrameXMLDir = Get-AnnotationDirectory -Path $FrameXMLDir
+$BareDir = Join-Path $FrameXMLDir '.bare'
+Assert-AnnotationRepositories
+if ($Check) {
+    [Console]::Error.WriteLine('Annotation paths and repositories passed validation.')
+    exit 0
+}
+
 # -- Git wrapper ------------------------------------------------------------
 
 function Invoke-GitCommand {
@@ -112,19 +273,23 @@ function Invoke-GitCommand {
         [Parameter(Mandatory)][string]$Description
     )
 
-    if (-not (Test-Path $WorkingDir -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $WorkingDir -PathType Container)) {
         throw "Working directory not found: $WorkingDir"
     }
 
     Write-Host "  git $($Arguments -join ' ')" -ForegroundColor DarkGray
-    Push-Location $WorkingDir
+    Push-Location -LiteralPath $WorkingDir
+    $PreviousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
         & git @Arguments 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "Git failed during '$Description' (exit code $LASTEXITCODE)"
-        }
+        $GitExitCode = $LASTEXITCODE
     } finally {
+        $ErrorActionPreference = $PreviousPreference
         Pop-Location
+    }
+    if ($GitExitCode -ne 0) {
+        throw "Git failed during '$Description' (exit code $GitExitCode)"
     }
 }
 
@@ -138,20 +303,20 @@ function Update-KethoRepo {
     Write-Host "Ketho annotations" -ForegroundColor Cyan
     Write-Host "  Directory: $AnnotationsDir"
 
-    $isFirstRun = -not (Test-Path (Join-Path $AnnotationsDir ".git"))
+    $isFirstRun = -not (Test-Path -LiteralPath (Join-Path $AnnotationsDir ".git"))
 
     if ($isFirstRun) {
         Write-Host "  Cloning..." -ForegroundColor Yellow
         $parentDir = Split-Path $AnnotationsDir -Parent
-        if (-not (Test-Path $parentDir -PathType Container)) {
-            New-Item -Path $parentDir -ItemType Directory -Force | Out-Null
+        if (-not (Test-Path -LiteralPath $parentDir -PathType Container)) {
+            [IO.Directory]::CreateDirectory($parentDir) | Out-Null
         }
         Invoke-GitCommand -Arguments @("clone", $KethoRepo, $AnnotationsDir) `
             -WorkingDir $parentDir `
             -Description "clone Ketho repo"
     } else {
         Write-Host "  Updating..." -ForegroundColor Yellow
-        Invoke-GitCommand -Arguments @("pull", "--ff-only") `
+        Invoke-GitCommand -Arguments @("pull", "--ff-only", "origin") `
             -WorkingDir $AnnotationsDir `
             -Description "pull Ketho repo"
     }
@@ -172,19 +337,19 @@ function Update-BareRepo {
     [CmdletBinding()]
     param()
 
-    $isFirstRun = -not (Test-Path $BareDir -PathType Container)
+    $isFirstRun = -not (Test-Path -LiteralPath (Join-Path $BareDir 'HEAD') -PathType Leaf)
 
     if ($isFirstRun) {
         Write-Host "  Cloning bare repo..." -ForegroundColor Yellow
-        if (-not (Test-Path $FrameXMLDir -PathType Container)) {
-            New-Item -Path $FrameXMLDir -ItemType Directory -Force | Out-Null
+        if (-not (Test-Path -LiteralPath $FrameXMLDir -PathType Container)) {
+            [IO.Directory]::CreateDirectory($FrameXMLDir) | Out-Null
         }
         Invoke-GitCommand -Arguments @("clone", "--bare", $FrameXMLRepo, $BareDir) `
             -WorkingDir $FrameXMLDir `
             -Description "clone bare FrameXML repo"
     } else {
         Write-Host "  Fetching bare repo..." -ForegroundColor Yellow
-        Invoke-GitCommand -Arguments @("fetch", "--all", "--prune") `
+        Invoke-GitCommand -Arguments @("fetch", "origin", "--prune") `
             -WorkingDir $BareDir `
             -Description "fetch bare FrameXML repo"
     }
@@ -200,7 +365,7 @@ function Update-Worktree {
     )
 
     $worktreeDir = Join-Path $FrameXMLDir $FlavorName
-    $isFirstRun = -not (Test-Path $worktreeDir -PathType Container)
+    $isFirstRun = -not (Test-Path -LiteralPath (Join-Path $worktreeDir '.git'))
 
     if ($isFirstRun) {
         Write-Host "  Creating worktree for '$FlavorName'..." -ForegroundColor Yellow

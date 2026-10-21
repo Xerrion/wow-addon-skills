@@ -1,143 +1,100 @@
-# ---------------------------------------------------------------------------
-# uninstall.ps1 - Remove WoW addon config items from OpenCode config dir
-#
-# Removes the known files and directories installed by install.ps1.
-# Use -Yes to skip the confirmation prompt.
-# PowerShell 5.1+ compatible.
-# ---------------------------------------------------------------------------
-
 #Requires -Version 5.1
-
+<#
+.SYNOPSIS
+Remove only the installed wow-addon skill. Preserve annotations and client configuration.
+.PARAMETER SkillsDir
+Absolute path to the parent skills directory. Defaults to ~/.agents/skills.
+.PARAMETER Yes
+Skip the confirmation prompt.
+.PARAMETER Help
+Show usage. PowerShell also supports -?.
+#>
 [CmdletBinding()]
 param(
-    [switch]$Yes
+    [string]$SkillsDir,
+    [switch]$Yes,
+    [switch]$Help
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
-# -- Resolve paths ----------------------------------------------------------
-
-$ConfigDir = Join-Path $env:USERPROFILE ".config\opencode"
-
-# -- State ------------------------------------------------------------------
-
-$Removed = 0
-
-# -- Guard: nothing to do if config dir missing -----------------------------
-
-if (-not (Test-Path $ConfigDir)) {
-    Write-Host "Nothing to do - OpenCode config directory does not exist."
+if ($Help) {
+    Write-Host 'Usage: .\uninstall.ps1 [-SkillsDir DIR] [-Yes]'
+    Write-Host 'Remove only ~/.agents/skills/wow-addon. Preserve annotations and client configuration.'
+    Write-Host 'SkillsDir must be an absolute path to a dedicated skills directory.'
     exit 0
 }
 
-# -- Confirmation prompt ----------------------------------------------------
+function Assert-PlainPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $Current = $Path
+    while ($Current) {
+        $Item = Get-Item -LiteralPath $Current -Force -ErrorAction SilentlyContinue
+        if ($null -ne $Item) {
+            if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Symbolic links and junctions are not supported in the skills path: $Current. Use the physical directory path."
+            }
+        }
+        $Parent = [IO.Path]::GetDirectoryName($Current)
+        if ($Parent -eq $Current) { break }
+        $Current = $Parent
+    }
+}
+
+# Check children without traversing links, including junctions on PowerShell 5.1.
+function Assert-PlainTree {
+    param([Parameter(Mandatory)][string]$Path)
+    Assert-PlainPath -Path $Path
+    $Pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $Pending.Push($Path)
+    while ($Pending.Count -gt 0) {
+        $Current = $Pending.Pop()
+        foreach ($Item in Get-ChildItem -LiteralPath $Current -Force) {
+            if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Symbolic links and junctions are not supported inside the skill: $($Item.FullName). Remove the link yourself first."
+            }
+            if ($Item.PSIsContainer) { $Pending.Push($Item.FullName) }
+        }
+    }
+}
+
+if (-not $SkillsDir) { $SkillsDir = Join-Path $HOME '.agents/skills' }
+if (-not [IO.Path]::IsPathRooted($SkillsDir) -or $SkillsDir -match '^[A-Za-z]:[^\\/]') {
+    throw '-SkillsDir must be an absolute directory path.'
+}
+$SkillsDir = [IO.Path]::GetFullPath($SkillsDir)
+$Separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+$SkillsDir = $SkillsDir.TrimEnd($Separators)
+$Root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($SkillsDir + [IO.Path]::DirectorySeparatorChar)).TrimEnd($Separators)
+$HomeDir = [IO.Path]::GetFullPath($HOME).TrimEnd($Separators)
+if ($SkillsDir -eq $Root -or $SkillsDir -eq $HomeDir) {
+    throw 'Choose a dedicated skills directory, not a filesystem root or home directory.'
+}
+Assert-PlainPath -Path $SkillsDir
+$Target = Join-Path $SkillsDir 'wow-addon'
+$RepositoryPrefix = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd($Separators) + [IO.Path]::DirectorySeparatorChar
+$TargetPrefix = [IO.Path]::GetFullPath($Target).TrimEnd($Separators) + [IO.Path]::DirectorySeparatorChar
+if ($TargetPrefix.StartsWith($RepositoryPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    $RepositoryPrefix.StartsWith($TargetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The uninstall destination overlaps the source skill or repository. Choose the installed skills directory.'
+}
+Assert-PlainPath -Path $Target
+if (-not (Test-Path -LiteralPath $Target)) {
+    Write-Host "Already absent: $Target"
+    exit 0
+}
+if (-not (Test-Path -LiteralPath $Target -PathType Container)) {
+    throw "The skill destination is not a directory: $Target. Move it yourself first."
+}
+Assert-PlainTree -Path $Target
 
 if (-not $Yes) {
-    $answer = Read-Host "This will remove WoW addon config items from ~/.config/opencode/. Continue? [y/N]"
-    if ($answer -notmatch '^[yY]') {
-        Write-Host "Aborted."
+    $Answer = Read-Host "Remove ${Target}? [y/N]"
+    if ($Answer -notmatch '^(?i:y|yes)$') {
+        Write-Host 'Aborted.'
         exit 0
     }
 }
-
-# -- Removal helper ---------------------------------------------------------
-
-function Remove-ConfigItem {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$Subdir,
-        [Parameter(Mandatory)][string]$Name,
-        [switch]$Recurse
-    )
-    $itemPath = Join-Path (Join-Path $ConfigDir $Subdir) $Name
-    if (Test-Path $itemPath) {
-        if ($Recurse) {
-            Remove-Item $itemPath -Recurse -Force
-        } else {
-            Remove-Item $itemPath -Force
-        }
-        Write-Host "  Removed: $Subdir/$Name" -ForegroundColor Green
-        $script:Removed++
-    } else {
-        Write-Host "  Already absent: $Subdir/$Name"
-    }
-}
-
-# -- Agents -----------------------------------------------------------------
-
-Write-Host "Agents:"
-$agentsSourceDir = Join-Path $PSScriptRoot "agents"
-if (Test-Path $agentsSourceDir) {
-    $agentFiles = Get-ChildItem -Path $agentsSourceDir -Filter "*.md" -File |
-        Sort-Object Name
-    foreach ($file in $agentFiles) {
-        Remove-ConfigItem -Subdir "agents" -Name $file.Name
-        Remove-ConfigItem -Subdir "agent" -Name $file.Name
-    }
-}
-
-# -- Skills -----------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Skills:"
-$skillsSourceDir = Join-Path $PSScriptRoot "skills"
-if (Test-Path $skillsSourceDir) {
-    $skillDirs = Get-ChildItem -Path $skillsSourceDir -Directory |
-        Sort-Object Name
-    foreach ($dir in $skillDirs) {
-        Remove-ConfigItem -Subdir "skills" -Name $dir.Name -Recurse
-        Remove-ConfigItem -Subdir "skill" -Name $dir.Name -Recurse
-    }
-}
-
-# -- Commands ---------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Commands:"
-$commandsSourceDir = Join-Path $PSScriptRoot "commands"
-if (Test-Path $commandsSourceDir) {
-    $commandFiles = Get-ChildItem -Path $commandsSourceDir -Filter "*.md" -File |
-        Sort-Object Name
-    foreach ($file in $commandFiles) {
-        Remove-ConfigItem -Subdir "commands" -Name $file.Name
-        Remove-ConfigItem -Subdir "command" -Name $file.Name
-    }
-}
-
-# -- Tools ------------------------------------------------------------------
-# Mirror-mode: enumerate the .ts files this repo would install, and remove
-# their counterparts at the destination. Then prune now-empty subdirs (e.g.
-# data/, savedvars/) but leave the tools/ root and any unknown files alone.
-
-Write-Host ""
-Write-Host "Tools:"
-$toolsSourceDir = Join-Path $PSScriptRoot "tools"
-if (Test-Path $toolsSourceDir) {
-    $toolFiles = Get-ChildItem -Path $toolsSourceDir -Filter "*.ts" -File -Recurse |
-        Where-Object { $_.FullName -notmatch '[\\/]__tests__[\\/]' -and $_.Name -notlike '*.test.ts' } |
-        Sort-Object FullName
-    foreach ($file in $toolFiles) {
-        $rel = $file.FullName.Substring($toolsSourceDir.Length).TrimStart('\', '/')
-        Remove-ConfigItem -Subdir "tools" -Name $rel
-        Remove-ConfigItem -Subdir "tool" -Name $rel
-    }
-
-    # Prune now-empty subdirectories under tools/ (leave non-empty ones alone).
-    foreach ($subdirName in @("tools", "tool")) {
-        $subdir = Join-Path $ConfigDir $subdirName
-        if (-not (Test-Path $subdir)) { continue }
-        Get-ChildItem -Path $subdir -Directory | ForEach-Object {
-            if (-not (Get-ChildItem -Path $_.FullName -Force)) {
-                Remove-Item $_.FullName -Force
-                Write-Host "  Removed empty: $subdirName/$($_.Name)/" -ForegroundColor Green
-                $script:Removed++
-            }
-        }
-    }
-}
-
-# -- Summary ----------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Done! $Removed items removed."
+Remove-Item -LiteralPath $Target -Recurse -Force
+Write-Host "Removed $Target"
