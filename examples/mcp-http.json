@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "wow-addon": {
+      "url": "https://wow-mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer REPLACE_WITH_YOUR_WOW_MCP_TOKEN"
+      }
+    }
+  }
+}

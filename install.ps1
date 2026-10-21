@@ -1,346 +1,345 @@
-# ---------------------------------------------------------------------------
-# install.ps1 - Install WoW addon agents, skills, commands, and tools into OpenCode
-#
-# Usage: .\install.ps1 [-Force] [-Annotations]
-#   -Force        Replace existing files/directories instead of skipping
-#   -Annotations  Run maintain-annotations.ps1 after install
-# ---------------------------------------------------------------------------
-
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+Install the portable skill and prepare a local MCP server interactively.
+.PARAMETER SkillsDir
+Absolute path to the parent skills directory. Defaults to ~/.agents/skills.
+.PARAMETER Force
+Replace the existing wow-addon directory.
+.PARAMETER Annotations
+Clone or update optional local annotation repositories.
+.PARAMETER Mcp
+Prepare the local MCP server and print complete settings JSON. Skip the skill
+unless interactive mode is selected.
+.PARAMETER Interactive
+Ask which components to install, including when input is redirected.
+.PARAMETER NonInteractive
+Disable prompts. Without -Mcp, install the portable skill only.
+.PARAMETER Help
+Show usage. PowerShell also supports -?.
+#>
 [CmdletBinding()]
 param(
+    [string]$SkillsDir,
     [switch]$Force,
-    [switch]$Annotations
+    [switch]$Annotations,
+    [switch]$Mcp,
+    [switch]$Interactive,
+    [switch]$NonInteractive,
+    [switch]$Help
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
-# -- Resolve paths ----------------------------------------------------------
-
-$ScriptDir = $PSScriptRoot
-$ConfigDir = Join-Path $env:USERPROFILE ".config\opencode"
-
-# Platform-native annotation storage - must match maintain-annotations.ps1.
-# Windows: %LOCALAPPDATA%; macOS/Linux (pwsh): ~/.local/share. PowerShell 5.1
-# only runs on Windows; $IsWindows exists from 6+ (the -lt 6 check must come
-# first so 5.1 never evaluates the undefined variable).
-$IsWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
-$DataHome = if ($IsWindowsHost) {
-    if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE "AppData\Local" }
-} else {
-    Join-Path $HOME ".local/share"
-}
-$AnnotationsDir = Join-Path $DataHome "wow-annotations"
-$FrameXMLDir = Join-Path $DataHome "wow-framexml"
-
-# -- State ------------------------------------------------------------------
-
-$Installed = 0
-$Skipped = 0
-
-# -- Guard: OpenCode must be installed --------------------------------------
-
-if (-not (Test-Path $ConfigDir -PathType Container)) {
-    Write-Host "X" -ForegroundColor Red -NoNewline
-    Write-Host " OpenCode config directory not found. Install OpenCode first."
-    exit 1
+if ($Help) {
+    Write-Output 'Usage: .\install.ps1 [-Interactive | -NonInteractive] [-Mcp] [-SkillsDir DIR] [-Force] [-Annotations]'
+    Write-Output 'With no arguments in a terminal, choose the skill, MCP server, paths, and annotations.'
+    Write-Output 'With flags or redirected input, install the skill to ~/.agents/skills/wow-addon.'
+    Write-Output '-Mcp prepares the MCP server only and prints settings JSON with absolute paths.'
+    Write-Output '-Interactive prompts with redirected input too. -NonInteractive disables prompts.'
+    Write-Output 'MCP setup installs missing locked Bun dependencies and builds the server.'
+    Write-Output 'Client settings are never changed. Redirect stdout to save the JSON.'
+    Write-Output 'Examples: .\install.ps1'
+    Write-Output '          .\install.ps1 -Mcp > mcp-settings.json'
+    exit 0
 }
 
-# Canonicalize so every message shows the fully expanded absolute path,
-# never an env-var or ~ shorthand.
-$ConfigDir = (Resolve-Path -LiteralPath $ConfigDir).ProviderPath
+if ($Interactive -and $NonInteractive) {
+    throw 'Choose either -Interactive or -NonInteractive.'
+}
 
-# -- Directory name detection -----------------------------------------------
-# OpenCode supports both singular (command/) and plural (commands/) directory
-# names. We detect which variant exists, falling back to sensible defaults.
+function Write-Status {
+    param([Parameter(Mandatory)][string]$Message)
+    [Console]::Error.WriteLine($Message)
+}
 
-function Resolve-ConfigSubdir {
-    [CmdletBinding()]
+function Read-InstallerLine {
+    param([Parameter(Mandatory)][string]$Prompt)
+    [Console]::Error.Write($Prompt)
+    $Answer = [Console]::ReadLine()
+    if ($null -eq $Answer) {
+        throw 'Input ended. Installer cancelled before making changes.'
+    }
+    return $Answer
+}
+
+function Read-YesNo {
     param(
-        [Parameter(Mandatory)][string]$Plural,
-        [Parameter(Mandatory)][string]$Singular,
+        [Parameter(Mandatory)][string]$Prompt,
+        [Parameter(Mandatory)][bool]$Default
+    )
+    $Choices = if ($Default) { '[Y/n]' } else { '[y/N]' }
+    while ($true) {
+        $Answer = (Read-InstallerLine -Prompt "$Prompt $Choices ").Trim().ToLowerInvariant()
+        if ($Answer -eq '') { return $Default }
+        if ($Answer -eq 'y' -or $Answer -eq 'yes') { return $true }
+        if ($Answer -eq 'n' -or $Answer -eq 'no') { return $false }
+        Write-Status 'Enter yes or no.'
+    }
+}
+
+function Read-InstallerPath {
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
         [Parameter(Mandatory)][string]$Default
     )
-
-    $pluralPath = Join-Path $ConfigDir $Plural
-    $singularPath = Join-Path $ConfigDir $Singular
-
-    if (Test-Path $pluralPath -PathType Container) {
-        return $pluralPath
-    }
-    if (Test-Path $singularPath -PathType Container) {
-        return $singularPath
-    }
-
-    $defaultPath = Join-Path $ConfigDir $Default
-    New-Item -Path $defaultPath -ItemType Directory -Force | Out-Null
-    return $defaultPath
+    $Answer = Read-InstallerLine -Prompt "$Prompt [$Default]: "
+    if ($Answer -eq '') { return $Default }
+    return $Answer
 }
 
-$AgentsDir = Resolve-ConfigSubdir "agents" "agent" "agents"
-$SkillsDir = Resolve-ConfigSubdir "skills" "skill" "skills"
-$CommandsDir = Resolve-ConfigSubdir "commands" "command" "commands"
-$ToolsDir = Resolve-ConfigSubdir "tools" "tool" "tools"
-
-# -- Copy helper ------------------------------------------------------------
-
-function Install-ConfigItem {
-    [CmdletBinding()]
+function Invoke-LoggedNative {
     param(
-        [Parameter(Mandatory)][string]$Source,
-        [Parameter(Mandatory)][string]$Target,
-        [Parameter(Mandatory)][string]$Label,
-        [switch]$IsDirectory
+        [Parameter(Mandatory)][string]$Executable,
+        [Parameter(Mandatory)][string[]]$Arguments
     )
+    # Windows PowerShell turns redirected native stderr into ErrorRecord
+    # objects. Do not treat a successful tool's progress output as a failure.
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Executable @Arguments 2>&1 | ForEach-Object {
+            [Console]::Error.WriteLine($_.ToString())
+        }
+        $NativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($NativeExitCode -ne 0) {
+        throw "$Executable failed with exit code $NativeExitCode."
+    }
+}
 
-    # Source must exist - fail fast on bad repo state
-    if (-not (Test-Path $Source)) {
-        Write-Host "X" -ForegroundColor Red -NoNewline
-        Write-Host " Source not found: $Source"
+function Invoke-ConfigHelper {
+    param(
+        [Parameter(Mandatory)][string]$BunExecutable,
+        [string[]]$Arguments = @()
+    )
+    $Output = & $BunExecutable (Join-Path $PSScriptRoot 'scripts/mcp-config.mjs') @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "MCP configuration failed with exit code $LASTEXITCODE."
+    }
+    return ($Output -join [Environment]::NewLine)
+}
+
+function Assert-PlainPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $Current = $Path
+    while ($Current) {
+        $Item = Get-Item -LiteralPath $Current -Force -ErrorAction SilentlyContinue
+        if ($null -ne $Item) {
+            if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Symbolic links and junctions are not supported in the skills path: $Current. Use the physical directory path."
+            }
+        }
+        $Parent = [IO.Path]::GetDirectoryName($Current)
+        if ($Parent -eq $Current) { break }
+        $Current = $Parent
+    }
+}
+
+# PowerShell 5.1 can follow junctions while removing directories. Refuse them
+# before replacing or recursively removing any tree.
+function Assert-PlainTree {
+    param([Parameter(Mandatory)][string]$Path)
+    Assert-PlainPath -Path $Path
+    $Pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $Pending.Push($Path)
+    while ($Pending.Count -gt 0) {
+        $Current = $Pending.Pop()
+        foreach ($Item in Get-ChildItem -LiteralPath $Current -Force) {
+            if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Symbolic links and junctions are not supported inside the skill: $($Item.FullName). Remove the link yourself first."
+            }
+            if ($Item.PSIsContainer) { $Pending.Push($Item.FullName) }
+        }
+    }
+}
+
+function Get-SkillInstallPlan {
+    param([Parameter(Mandatory)][string]$ParentDirectory)
+    if ($ParentDirectory -match '[\r\n]') {
+        throw '-SkillsDir cannot contain a newline.'
+    }
+    if (-not [IO.Path]::IsPathRooted($ParentDirectory) -or $ParentDirectory -match '^[A-Za-z]:[^\\/]') {
+        throw '-SkillsDir must be an absolute directory path.'
+    }
+    $ParentDirectory = [IO.Path]::GetFullPath($ParentDirectory)
+    $Separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $ParentDirectory = $ParentDirectory.TrimEnd($Separators)
+    $Root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($ParentDirectory + [IO.Path]::DirectorySeparatorChar)).TrimEnd($Separators)
+    $HomeDir = [IO.Path]::GetFullPath($HOME).TrimEnd($Separators)
+    if ($ParentDirectory -eq $Root -or $ParentDirectory -eq $HomeDir) {
+        throw 'Choose a dedicated skills directory, not a filesystem root or home directory.'
+    }
+    Assert-PlainPath -Path $ParentDirectory
+
+    $Source = Join-Path $PSScriptRoot 'skills/wow-addon'
+    if (-not (Test-Path -LiteralPath (Join-Path $Source 'SKILL.md') -PathType Leaf)) {
+        throw "Missing source skill: $Source/SKILL.md. Use a complete repository checkout."
+    }
+    Assert-PlainTree -Path $Source
+    $Target = Join-Path $ParentDirectory 'wow-addon'
+    $RepositoryPrefix = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd($Separators) + [IO.Path]::DirectorySeparatorChar
+    $TargetPrefix = [IO.Path]::GetFullPath($Target).TrimEnd($Separators) + [IO.Path]::DirectorySeparatorChar
+    if ($TargetPrefix.StartsWith($RepositoryPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $RepositoryPrefix.StartsWith($TargetPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The install destination overlaps the source skill or repository. Choose a different skills directory.'
+    }
+    Assert-PlainPath -Path $Target
+    $Exists = Test-Path -LiteralPath $Target
+    if ($Exists -and -not (Test-Path -LiteralPath $Target -PathType Container)) {
+        throw "The skill destination is not a directory: $Target. Move it yourself first."
+    }
+    return [PSCustomObject]@{
+        SkillsDir = $ParentDirectory
+        Source = $Source
+        Target = $Target
+        Exists = $Exists
+    }
+}
+
+function Install-PortableSkill {
+    param(
+        [Parameter(Mandatory)]$Plan,
+        [Parameter(Mandatory)][bool]$ReplaceExisting
+    )
+    $CurrentPlan = Get-SkillInstallPlan -ParentDirectory $Plan.SkillsDir
+    if ($CurrentPlan.Exists -ne $Plan.Exists) {
+        throw 'The skill destination changed while choosing settings. Rerun the installer.'
+    }
+    $Plan = $CurrentPlan
+    if ($Plan.Exists -and -not $ReplaceExisting) {
+        Write-Status "Skipped $($Plan.Target) (already exists; use -Force to replace)."
         return
     }
+    if ($Plan.Exists) { Assert-PlainTree -Path $Plan.Target }
+    [IO.Directory]::CreateDirectory($Plan.SkillsDir) | Out-Null
+    $Staging = Join-Path $Plan.SkillsDir ('.wow-addon-install.' + [Guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($Staging) | Out-Null
+    $NewSkill = Join-Path $Staging 'new'
+    $Previous = Join-Path $Staging 'previous'
+    try {
+        Copy-Item -LiteralPath $Plan.Source -Destination $NewSkill -Recurse
+        if ($Plan.Exists) { Move-Item -LiteralPath $Plan.Target -Destination $Previous }
+        Move-Item -LiteralPath $NewSkill -Destination $Plan.Target
+        Write-Status "Installed $($Plan.Target)"
+    } finally {
+        if ((Test-Path -LiteralPath $Previous) -and -not (Test-Path -LiteralPath $Plan.Target)) {
+            Move-Item -LiteralPath $Previous -Destination $Plan.Target
+        }
+        Remove-Item -LiteralPath $Staging -Recurse -Force
+    }
+}
 
-    # Target already exists - skip or replace depending on -Force
-    if (Test-Path $Target) {
-        if ($Force) {
-            Remove-Item $Target -Force -Recurse
-            if ($IsDirectory) {
-                Copy-Item -Path $Source -Destination $Target -Recurse -Force
+$TerminalInput = $false
+try { $TerminalInput = $Host.Name -eq 'ConsoleHost' -and -not [Console]::IsInputRedirected } catch {}
+$AskQuestions = $Interactive -or (-not $NonInteractive -and $PSBoundParameters.Count -eq 0 -and $TerminalInput)
+$InstallSkill = -not $Mcp
+$PrepareMcp = [bool]$Mcp
+$UpdateAnnotations = [bool]$Annotations
+$ReplaceSkill = [bool]$Force
+if (-not $SkillsDir) { $SkillsDir = Join-Path $HOME '.agents/skills' }
+
+if ($AskQuestions) {
+    $InstallSkill = Read-YesNo -Prompt 'Install the portable wow-addon skill?' -Default $true
+    if ($InstallSkill) {
+        $SkillsDir = Read-InstallerPath -Prompt 'Parent skills directory (absolute path)' -Default $SkillsDir
+    }
+}
+$SkillPlan = $null
+if ($InstallSkill) {
+    $SkillPlan = Get-SkillInstallPlan -ParentDirectory $SkillsDir
+    if ($AskQuestions -and $SkillPlan.Exists) {
+        $ReplaceSkill = Read-YesNo -Prompt "Replace the existing skill at $($SkillPlan.Target)?" -Default $false
+    }
+}
+
+# PowerShell 5.1 runs on Windows. The short circuit avoids reading an
+# undefined $IsWindows variable on that version under strict mode.
+$IsWindowsHost = ($PSVersionTable.PSVersion.Major -lt 6) -or $IsWindows
+$DataHome = if ($IsWindowsHost) {
+    if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData/Local' }
+} else {
+    Join-Path $HOME '.local/share'
+}
+$AnnotationRoot = if ($env:WOW_ANNOTATIONS_ROOT) { $env:WOW_ANNOTATIONS_ROOT } else { Join-Path $DataHome 'wow-annotations' }
+$FrameXmlRoot = if ($env:WOW_FRAMEXML_ROOT) { $env:WOW_FRAMEXML_ROOT } else { Join-Path $DataHome 'wow-framexml' }
+
+if ($AskQuestions) {
+    $PrepareMcp = Read-YesNo -Prompt 'Prepare the local MCP server (install missing locked Bun dependencies, build, and print settings JSON)?' -Default $true
+    if ($PrepareMcp) {
+        $AnnotationRoot = Read-InstallerPath -Prompt 'WoW API annotations directory' -Default $AnnotationRoot
+        $FrameXmlRoot = Read-InstallerPath -Prompt 'FrameXML annotations directory' -Default $FrameXmlRoot
+    }
+    $UpdateAnnotations = Read-YesNo -Prompt 'Clone or update local annotation repositories using git?' -Default ([bool]$Annotations)
+}
+
+$PreviousAnnotationRoot = $env:WOW_ANNOTATIONS_ROOT
+$PreviousFrameXmlRoot = $env:WOW_FRAMEXML_ROOT
+try {
+    $BunExecutable = $null
+    if ($PrepareMcp) {
+        $BunCommand = Get-Command bun -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $BunCommand) {
+            throw 'Bun is missing. Install Bun 1.3.12 or newer, then rerun the installer.'
+        }
+        $BunExecutable = $BunCommand.Source
+        Invoke-LoggedNative -Executable $BunExecutable -Arguments @((Join-Path $PSScriptRoot 'scripts/mcp-config.mjs'), '--check-runtime')
+        $env:WOW_ANNOTATIONS_ROOT = $AnnotationRoot
+        $env:WOW_FRAMEXML_ROOT = $FrameXmlRoot
+        $env:WOW_ANNOTATIONS_ROOT = Invoke-ConfigHelper -BunExecutable $BunExecutable -Arguments @('--annotations-root')
+        $env:WOW_FRAMEXML_ROOT = Invoke-ConfigHelper -BunExecutable $BunExecutable -Arguments @('--framexml-root')
+        Invoke-LoggedNative -Executable $BunExecutable -Arguments @((Join-Path $PSScriptRoot 'scripts/mcp-config.mjs'), '--check-prerequisites')
+    }
+
+    if ($UpdateAnnotations) {
+        $LASTEXITCODE = 0
+        & (Join-Path $PSScriptRoot 'maintain-annotations.ps1') -Check *>&1 | ForEach-Object {
+            [Console]::Error.WriteLine($_.ToString())
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "Annotation preflight failed with exit code $LASTEXITCODE."
+        }
+    }
+
+    if ($InstallSkill) { Install-PortableSkill -Plan $SkillPlan -ReplaceExisting $ReplaceSkill }
+
+    if ($PrepareMcp) {
+        Push-Location -LiteralPath $PSScriptRoot
+        try {
+            $CompilerName = if ($IsWindowsHost) { 'tsc.cmd' } else { 'tsc' }
+            $ServerDependency = Join-Path $PSScriptRoot 'node_modules/@modelcontextprotocol/server/package.json'
+            $Compiler = Join-Path $PSScriptRoot ('node_modules/.bin/' + $CompilerName)
+            if (-not (Test-Path -LiteralPath $ServerDependency -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $Compiler -PathType Leaf)) {
+                Write-Status 'Installing locked Bun dependencies in the repository.'
+                Invoke-LoggedNative -Executable $BunExecutable -Arguments @('ci')
             }
-            else {
-                Copy-Item -Path $Source -Destination $Target -Force
-            }
-            Write-Host "  Replaced $Label" -ForegroundColor Yellow
-            $script:Installed++
-            return
-        }
-        else {
-            Write-Host "->" -ForegroundColor Yellow -NoNewline
-            Write-Host " Skipped $Label (already exists, use -Force to replace)"
-            $script:Skipped++
-            return
+            Write-Status 'Building the local MCP server.'
+            Invoke-LoggedNative -Executable $BunExecutable -Arguments @('run', 'build')
+        } finally {
+            Pop-Location
         }
     }
 
-    # Happy path: target is free, copy the item
-    if ($IsDirectory) {
-        Copy-Item -Path $Source -Destination $Target -Recurse
-    }
-    else {
-        Copy-Item -Path $Source -Destination $Target
-    }
-    Write-Host "+" -ForegroundColor Green -NoNewline
-    Write-Host " Installed $Label"
-    $script:Installed++
-}
-
-# -- Source directory guard --------------------------------------------------
-
-function Assert-SourceDir {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$Label
-    )
-    if (-not (Test-Path $Path)) {
-        Write-Host "ERROR: Source directory not found: $Path" -ForegroundColor Red
-        Write-Host "Ensure you are running from a complete clone of the repository." -ForegroundColor Yellow
-        exit 1
-    }
-}
-
-# -- Agents (individual .md files) ------------------------------------------
-
-Write-Host "Agents:"
-$agentsSourceDir = Join-Path $ScriptDir "agents"
-Assert-SourceDir -Path $agentsSourceDir -Label "agents"
-$agentFiles = Get-ChildItem -Path $agentsSourceDir -Filter "*.md" -File
-foreach ($file in $agentFiles) {
-    $targetPath = Join-Path $AgentsDir $file.Name
-    Install-ConfigItem -Source $file.FullName -Target $targetPath -Label $file.Name
-}
-
-# -- Skills (entire directories, not individual files) ----------------------
-
-Write-Host ""
-Write-Host "Skills:"
-$skillsSourceDir = Join-Path $ScriptDir "skills"
-Assert-SourceDir -Path $skillsSourceDir -Label "skills"
-$skillDirs = Get-ChildItem -Path $skillsSourceDir -Directory
-foreach ($dir in $skillDirs) {
-    $targetPath = Join-Path $SkillsDir $dir.Name
-    Install-ConfigItem -Source $dir.FullName -Target $targetPath -Label $dir.Name -IsDirectory
-}
-
-# -- Commands (individual .md files) ----------------------------------------
-
-Write-Host ""
-Write-Host "Commands:"
-$commandsSourceDir = Join-Path $ScriptDir "commands"
-Assert-SourceDir -Path $commandsSourceDir -Label "commands"
-$commandFiles = Get-ChildItem -Path $commandsSourceDir -Filter "*.md" -File
-foreach ($file in $commandFiles) {
-    $targetPath = Join-Path $CommandsDir $file.Name
-    Install-ConfigItem -Source $file.FullName -Target $targetPath -Label $file.Name
-}
-
-# -- Tools (.ts files, recursively, preserving subdirectory structure) ------
-# Skips __tests__/ directories and *.test.ts files - those are dev-only.
-
-Write-Host ""
-Write-Host "Tools:"
-$toolsSourceDir = Join-Path $ScriptDir "tools"
-Assert-SourceDir -Path $toolsSourceDir -Label "tools"
-$toolFiles = Get-ChildItem -Path $toolsSourceDir -Filter "*.ts" -File -Recurse |
-    Where-Object { $_.FullName -notmatch '[\\/]__tests__[\\/]' -and $_.Name -notlike '*.test.ts' } |
-    Sort-Object FullName
-foreach ($file in $toolFiles) {
-    $rel = $file.FullName.Substring($toolsSourceDir.Length).TrimStart('\', '/')
-    $targetPath = Join-Path $ToolsDir $rel
-    $targetDir = Split-Path $targetPath -Parent
-    if (-not (Test-Path $targetDir)) {
-        New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
-    }
-    Install-ConfigItem -Source $file.FullName -Target $targetPath -Label $rel
-}
-
-# -- Tool dependencies ------------------------------------------------------
-# Tools under tools/ import 'zod' and '@opencode-ai/plugin/tool'. Declare them
-# in ~/.config/opencode/package.json so OpenCode can resolve them at runtime.
-
-Write-Host ""
-Write-Host "Tool dependencies:"
-
-$PkgJson = Join-Path $ConfigDir "package.json"
-$ToolDeps = [ordered]@{
-    "zod"                 = "latest"
-    "@opencode-ai/plugin" = "latest"
-}
-
-if (-not (Test-Path $PkgJson -PathType Leaf)) {
-    $newPkg = [ordered]@{
-        name         = "opencode-config"
-        private      = $true
-        dependencies = $ToolDeps
-    }
-    try {
-        ($newPkg | ConvertTo-Json -Depth 4) | Set-Content -Path $PkgJson -Encoding UTF8
-        Write-Host "+" -ForegroundColor Green -NoNewline
-        Write-Host " Created $PkgJson with zod and @opencode-ai/plugin"
-    }
-    catch {
-        Write-Host "X" -ForegroundColor Red -NoNewline
-        Write-Host " Failed to create ${PkgJson}: $($_.Exception.Message)"
-    }
-}
-else {
-    try {
-        $pkg = Get-Content -Path $PkgJson -Raw -Encoding UTF8 | ConvertFrom-Json
-        if (-not $pkg.PSObject.Properties.Match('dependencies').Count -or $null -eq $pkg.dependencies) {
-            $pkg | Add-Member -NotePropertyName dependencies -NotePropertyValue ([pscustomobject]@{}) -Force
+    if ($UpdateAnnotations) {
+        $LASTEXITCODE = 0
+        & (Join-Path $PSScriptRoot 'maintain-annotations.ps1') *>&1 | ForEach-Object {
+            [Console]::Error.WriteLine($_.ToString())
         }
-        foreach ($name in $ToolDeps.Keys) {
-            $version = $ToolDeps[$name]
-            if (-not $pkg.dependencies.PSObject.Properties.Match($name).Count) {
-                $pkg.dependencies | Add-Member -NotePropertyName $name -NotePropertyValue $version -Force
-            }
-            Write-Host "+" -ForegroundColor Green -NoNewline
-            Write-Host " Ensured $name present in $PkgJson"
-        }
-        ($pkg | ConvertTo-Json -Depth 10) | Set-Content -Path $PkgJson -Encoding UTF8
-    }
-    catch {
-        Write-Host "!" -ForegroundColor Yellow -NoNewline
-        Write-Host " Failed to update $PkgJson (file may be invalid JSON or unreadable; inspect $PkgJson)"
-    }
-}
-
-if (Get-Command bun -ErrorAction SilentlyContinue) {
-    Push-Location $ConfigDir
-    try {
-        & bun install --silent
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "+" -ForegroundColor Green -NoNewline
-            Write-Host " Ran bun install in $ConfigDir"
-        }
-        else {
-            Write-Host "-" -ForegroundColor Yellow -NoNewline
-            Write-Host " bun install failed - run 'bun install' manually in $ConfigDir"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Annotation maintenance failed with exit code $LASTEXITCODE."
         }
     }
-    catch {
-        Write-Host "-" -ForegroundColor Yellow -NoNewline
-        Write-Host " bun install failed - run 'bun install' manually in $ConfigDir"
+
+    if ($PrepareMcp) {
+        $SettingsJson = Invoke-ConfigHelper -BunExecutable $BunExecutable
+        Write-Status 'Copy this JSON into your MCP client settings.'
+        Write-Output $SettingsJson
     }
-    finally {
-        Pop-Location
-    }
+} finally {
+    $env:WOW_ANNOTATIONS_ROOT = $PreviousAnnotationRoot
+    $env:WOW_FRAMEXML_ROOT = $PreviousFrameXmlRoot
 }
-else {
-    Write-Host "-" -ForegroundColor Yellow -NoNewline
-    Write-Host " bun not found - run 'bun install' manually in $ConfigDir"
-}
-
-# -- Summary ----------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Done! $Installed items installed, $Skipped skipped."
-
-# -- Annotations (optional) -------------------------------------------------
-
-$isAnnotationsOk = $false
-if ($Annotations) {
-    Write-Host ""
-    Write-Host "Setting up annotations..."
-    try {
-        $psExe = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "powershell" }
-        & $psExe -NoProfile -File (Join-Path $ScriptDir "maintain-annotations.ps1")
-        if ($LASTEXITCODE -eq 0) {
-            $isAnnotationsOk = $true
-        }
-        else {
-            throw "maintain-annotations.ps1 exited with code $LASTEXITCODE"
-        }
-    }
-    catch {
-        Write-Host "X" -ForegroundColor Red -NoNewline
-        Write-Host " Annotation setup failed (config install succeeded - run maintain-annotations.ps1 manually)"
-        Write-Warning $_.Exception.Message
-    }
-}
-
-# -- Annotation access for agents ---------------------------------------------
-# Agents read the annotation trees from arbitrary project directories, so
-# OpenCode needs external_directory read permission on BOTH annotation roots.
-# The config dir itself needs no entry - OpenCode always reads its own config.
-
-if ($isAnnotationsOk) {
-    Write-Host ""
-    Write-Host "Annotation access for agents:"
-    Write-Host 'Both entries below are required under "permission" in your opencode.json'
-    Write-Host "(one per annotation directory - copy the block as-is):"
-    Write-Host ""
-    # Forward slashes keep the paths valid JSON without backslash escaping.
-    $annotationsGlob = $AnnotationsDir.Replace('\', '/') + '/**'
-    $framexmlGlob = $FrameXMLDir.Replace('\', '/') + '/**'
-    Write-Host '  "external_directory": {' -ForegroundColor Cyan
-    Write-Host ('    "' + $annotationsGlob + '": "allow",') -ForegroundColor Cyan
-    Write-Host ('    "' + $framexmlGlob + '": "allow"') -ForegroundColor Cyan
-    Write-Host '  }' -ForegroundColor Cyan
-}
-
-# -- Next steps -------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Next steps:"
-if ($isAnnotationsOk) {
-    Write-Host "  1. See README.md for multi-flavor annotation details"
-}
-else {
-    Write-Host "  1. Set up annotations:"
-    Write-Host "     .\maintain-annotations.ps1"
-    Write-Host "  2. See README.md for full setup instructions"
-}
-
-Write-Host ""
-Write-Host "Installed to: $ConfigDir"

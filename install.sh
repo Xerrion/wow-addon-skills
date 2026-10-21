@@ -1,276 +1,207 @@
 #!/usr/bin/env bash
 set -euo pipefail
-shopt -s nullglob
 
-# ---------------------------------------------------------------------------
-# install.sh - Copy WoW addon agents, skills, commands, and tools into OpenCode
-#
-# Usage: ./install.sh [--force] [--annotations]
-#   --force        Replace existing files/directories instead of skipping
-#   --annotations  Run maintain-annotations.sh after install
-# ---------------------------------------------------------------------------
+show_help() {
+    cat <<'HELP'
+Usage: ./install.sh [--interactive | --non-interactive] [--mcp] [--skills-dir DIR] [--force] [--annotations]
 
-# -- Colors -----------------------------------------------------------------
+Install the portable wow-addon skill to ~/.agents/skills/wow-addon.
+With no arguments in a terminal, choose the skill and MCP setup interactively.
+Example: ./install.sh --mcp > wow-addon-mcp.json
+  --interactive     Ask setup questions, including when input is piped
+  --non-interactive Use flags without asking questions
+  --mcp             Prepare only the MCP server and print its finished JSON
+  --skills-dir DIR  Absolute path to the parent skills directory
+  --force           Replace the existing wow-addon directory
+  --annotations     Clone or update optional local annotation repositories
+  --help, -h        Show this help
 
-GREEN=$'\033[0;32m'
-YELLOW=$'\033[0;33m'
-RED=$'\033[0;31m'
-RESET=$'\033[0m'
+MCP setup installs missing locked Bun dependencies and builds the local server.
+Copy the printed JSON into your MCP client settings. Client settings are never edited.
+HELP
+}
 
-# -- Resolve paths ----------------------------------------------------------
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG_DIR="${HOME}/.config/opencode"
-
-# Platform-native annotation storage - must match maintain-annotations.sh.
-ANNOTATIONS_DIR="${HOME}/.local/share/wow-annotations"
-FRAMEXML_DIR="${HOME}/.local/share/wow-framexml"
-
-# -- State ------------------------------------------------------------------
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
 FORCE=false
 ANNOTATIONS=false
-INSTALLED=0
-SKIPPED=0
-
-# -- Parse flags ------------------------------------------------------------
-
-for arg in "$@"; do
-    case "$arg" in
-        --force) FORCE=true ;;
-        --annotations) ANNOTATIONS=true ;;
-        *)
-            printf '%s\n' "${RED}✗${RESET} Unknown option: ${arg}" >&2
-            echo "Usage: $0 [--force] [--annotations]" >&2
-            exit 1
-            ;;
+MCP=false
+INSTALL_SKILL=true
+INTERACTIVE=auto
+ARGUMENT_COUNT="$#"
+SKILLS_DIR="${HOME:?HOME must be set}/.agents/skills"
+ANNOTATIONS_ROOT="${WOW_ANNOTATIONS_ROOT:-${HOME}/.local/share/wow-annotations}"
+FRAMEXML_ROOT="${WOW_FRAMEXML_ROOT:-${HOME}/.local/share/wow-framexml}"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --help|-h) show_help; exit 0 ;;
+        --force) FORCE=true; shift ;;
+        --annotations) ANNOTATIONS=true; shift ;;
+        --mcp) MCP=true; INSTALL_SKILL=false; shift ;;
+        --interactive)
+            [ "$INTERACTIVE" != false ] || fail 'Choose either --interactive or --non-interactive.'
+            INTERACTIVE=true; shift ;;
+        --non-interactive)
+            [ "$INTERACTIVE" != true ] || fail 'Choose either --interactive or --non-interactive.'
+            INTERACTIVE=false; shift ;;
+        --skills-dir)
+            [ "$#" -ge 2 ] && [ -n "$2" ] || fail '--skills-dir requires an absolute directory path.'
+            SKILLS_DIR="$2"; shift 2 ;;
+        *) fail "Unknown option: $1. Run ./install.sh --help." ;;
     esac
 done
 
-# -- Guard: OpenCode must be installed --------------------------------------
-
-if [ ! -d "$CONFIG_DIR" ]; then
-    printf '%s\n' "${RED}✗${RESET} OpenCode config directory not found. Install OpenCode first." >&2
-    exit 1
+SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd -P)"
+if [ "$INTERACTIVE" = auto ]; then
+    INTERACTIVE=false
+    if [ "$ARGUMENT_COUNT" -eq 0 ] && [ -t 0 ]; then INTERACTIVE=true; fi
 fi
 
-# -- Directory name detection -----------------------------------------------
-# OpenCode supports both singular (command/) and plural (commands/) directory
-# names. We detect which variant exists, falling back to sensible defaults.
-
-resolve_config_subdir() {
-    local plural="$1"
-    local singular="$2"
-    local default="$3"
-
-    if [ -d "${CONFIG_DIR}/${plural}" ]; then
-        echo "${CONFIG_DIR}/${plural}"
-    elif [ -d "${CONFIG_DIR}/${singular}" ]; then
-        echo "${CONFIG_DIR}/${singular}"
-    else
-        mkdir -p "${CONFIG_DIR}/${default}"
-        echo "${CONFIG_DIR}/${default}"
-    fi
-}
-
-AGENTS_DIR="$(resolve_config_subdir "agents" "agent" "agents")"
-SKILLS_DIR="$(resolve_config_subdir "skills" "skill" "skills")"
-COMMANDS_DIR="$(resolve_config_subdir "commands" "command" "commands")"
-TOOLS_DIR="$(resolve_config_subdir "tools" "tool" "tools")"
-
-# -- Copy helper ------------------------------------------------------------
-
-install_item() {
-    local source="$1"
-    local target="$2"
-    local label="$3"
-    local replaced=false
-
-    # Source must exist - fail fast on bad repo state
-    if [ ! -e "$source" ]; then
-        printf '%s\n' "${RED}✗${RESET} Source not found: ${source}" >&2
-        return 1
-    fi
-
-    # Target already exists
-    if [ -e "$target" ]; then
-        if [ "$FORCE" = true ]; then
-            rm -rf "$target"
-            replaced=true
-        else
-            printf '%s\n' "${YELLOW}-${RESET} Skipped ${label} (already exists, use --force to replace)"
-            SKIPPED=$((SKIPPED + 1))
-            return 0
-        fi
-    fi
-
-    # Copy: use -R for directories, plain cp for files
-    if [ -d "$source" ]; then
-        cp -R "$source" "$target"
-    else
-        cp "$source" "$target"
-    fi
-
-    if [ "$replaced" = true ]; then
-        printf '%s\n' "${YELLOW}  Replaced ${label}${RESET}"
-    else
-        printf '%s\n' "${GREEN}✓${RESET} Installed ${label}"
-    fi
-    INSTALLED=$((INSTALLED + 1))
-}
-
-# -- Agents (individual .md files) ------------------------------------------
-
-echo "Agents:"
-for file in "${SCRIPT_DIR}/agents/"*.md; do
-    name="$(basename "$file")"
-    install_item "$file" "${AGENTS_DIR}/${name}" "$name"
-done
-
-# -- Skills (entire directories, not individual files) ----------------------
-
-echo ""
-echo "Skills:"
-for dir in "${SCRIPT_DIR}/skills/"*/; do
-    name="$(basename "$dir")"
-    install_item "${SCRIPT_DIR}/skills/${name}" "${SKILLS_DIR}/${name}" "$name"
-done
-
-# -- Commands (individual .md files) ----------------------------------------
-
-echo ""
-echo "Commands:"
-for file in "${SCRIPT_DIR}/commands/"*.md; do
-    name="$(basename "$file")"
-    install_item "$file" "${COMMANDS_DIR}/${name}" "$name"
-done
-
-# -- Tools (.ts files, recursively, preserving subdirectory structure) ------
-# Skips __tests__/ directories and *.test.ts files - those are dev-only.
-
-echo ""
-echo "Tools:"
-while IFS= read -r file; do
-    rel="${file#${SCRIPT_DIR}/tools/}"
-    target="${TOOLS_DIR}/${rel}"
-    target_dir="$(dirname "$target")"
-    [ -d "$target_dir" ] || mkdir -p "$target_dir"
-    install_item "$file" "$target" "$rel"
-done < <(find "${SCRIPT_DIR}/tools" -type f -name "*.ts" \
-    -not -path "*/__tests__/*" -not -name "*.test.ts" | sort)
-
-# -- Tool dependencies ------------------------------------------------------
-# Tools under tools/ import 'zod' and '@opencode-ai/plugin/tool'. Declare them
-# in ~/.config/opencode/package.json so OpenCode can resolve them at runtime.
-
-echo ""
-echo "Tool dependencies:"
-
-PKG_JSON="${CONFIG_DIR}/package.json"
-TOOL_DEPS=("zod:latest" "@opencode-ai/plugin:latest")
-
-if [ ! -f "$PKG_JSON" ]; then
-    cat > "$PKG_JSON" <<'EOF'
-{
-  "name": "opencode-config",
-  "private": true,
-  "dependencies": {
-    "zod": "latest",
-    "@opencode-ai/plugin": "latest"
-  }
-}
-EOF
-    printf '%s\n' "${GREEN}✓${RESET} Created ${PKG_JSON} with zod and @opencode-ai/plugin"
-elif command -v jq >/dev/null 2>&1; then
-    for dep in "${TOOL_DEPS[@]}"; do
-        name="${dep%%:*}"
-        version="${dep#*:}"
-        if ! tmp="$(mktemp)"; then
-            printf '%s\n' "${YELLOW}!${RESET} Failed to create temp file for ${name}; skipping" >&2
-            continue
-        fi
-        if jq --arg n "$name" --arg v "$version" \
-            '.dependencies = (.dependencies // {}) | .dependencies[$n] = (.dependencies[$n] // $v)' \
-            "$PKG_JSON" > "$tmp"; then
-            mv "$tmp" "$PKG_JSON"
-            printf '%s\n' "${GREEN}✓${RESET} Ensured ${name} present in ${PKG_JSON}"
-        else
-            rm -f "$tmp"
-            printf '%s\n' "${RED}✗${RESET} Failed to update ${PKG_JSON} for ${name} (file may be invalid JSON or unreadable; inspect ${PKG_JSON})" >&2
-        fi
+ask_yes_no() {
+    local question="$1" default="$2" suffix='[y/N]'
+    if [ "$default" = true ]; then suffix='[Y/n]'; fi
+    while :; do
+        printf '%s %s: ' "$question" "$suffix" >&2
+        IFS= read -r ANSWER || fail 'Input ended before setup was confirmed. Run again and answer every prompt.'
+        case "$ANSWER" in
+            '') ANSWER="$default"; return ;;
+            y|Y|yes|YES|Yes) ANSWER=true; return ;;
+            n|N|no|NO|No) ANSWER=false; return ;;
+            *) printf 'Enter yes or no.\n' >&2 ;;
+        esac
     done
-else
-    printf '%s\n' "${YELLOW}-${RESET} jq not found - add 'zod' and '@opencode-ai/plugin' to ${PKG_JSON} manually"
-fi
+}
 
-if command -v bun >/dev/null 2>&1; then
-    if (cd "$CONFIG_DIR" && bun install --silent); then
-        printf '%s\n' "${GREEN}✓${RESET} Ran bun install in ${CONFIG_DIR}"
-    else
-        printf '%s\n' "${YELLOW}-${RESET} bun install failed - run 'bun install' manually in ${CONFIG_DIR}"
+ask_path() {
+    printf '%s [%s]: ' "$1" "$2" >&2
+    IFS= read -r ANSWER || fail 'Input ended before setup was confirmed. Run again and answer every prompt.'
+    ANSWER="${ANSWER:-$2}"
+}
+
+# Refuse aliases before any writes. Deletion is limited to the named skill.
+validate_skill_destination() {
+    case "$SKILLS_DIR" in /*) ;; *) fail '--skills-dir must be an absolute directory path.' ;; esac
+    case "$SKILLS_DIR" in *$'\n'*) fail 'The skills directory path must not contain a newline.' ;; esac
+    NORMALIZED=""
+    IFS='/' read -r -a PARTS <<< "$SKILLS_DIR"
+    for PART in "${PARTS[@]}"; do
+        [ -n "$PART" ] || continue
+        case "$PART" in .|..) fail 'Use an absolute skills directory without . or .. path components.' ;; esac
+        NORMALIZED="${NORMALIZED}/${PART}"
+        [ ! -L "$NORMALIZED" ] || fail "Symbolic links are not supported in the skills path: ${NORMALIZED}. Use the physical directory path."
+    done
+    SKILLS_DIR="${NORMALIZED:-/}"
+    HOME_DIR="$(cd -P "$HOME" && pwd -P)"
+    [ "$SKILLS_DIR" != / ] && [ "$SKILLS_DIR" != "$HOME_DIR" ] || fail 'Choose a dedicated skills directory, not a filesystem root or home directory.'
+    TARGET="${SKILLS_DIR}/wow-addon"
+    [ ! -L "$TARGET" ] || fail "Refusing to replace a symbolic link: ${TARGET}. Remove the link yourself first."
+    # Compare directory identities because path casing can vary on the same volume.
+    within_directory() {
+        local candidate="$1" ancestor="$2"
+        while :; do
+            if [ "$candidate" -ef "$ancestor" ]; then return 0; fi
+            [ "$candidate" != / ] || return 1
+            candidate="${candidate%/*}"
+            candidate="${candidate:-/}"
+        done
+    }
+    if within_directory "$TARGET" "$SCRIPT_DIR" || within_directory "$SCRIPT_DIR" "$TARGET"; then
+        fail 'The install destination overlaps the source skill or repository. Choose a different skills directory.'
     fi
-else
-    printf '%s\n' "${YELLOW}-${RESET} bun not found - run 'bun install' manually in ${CONFIG_DIR}"
+    if [ -e "$TARGET" ]; then
+        [ -d "$TARGET" ] || fail "The skill destination is not a directory: ${TARGET}. Move it yourself first."
+    fi
+}
+
+if [ "$INTERACTIVE" = true ]; then
+    ask_yes_no 'Install the wow-addon skill?' true
+    INSTALL_SKILL="$ANSWER"
+    if [ "$INSTALL_SKILL" = true ]; then
+        ask_path 'Parent skills directory (absolute path)' "$SKILLS_DIR"
+        SKILLS_DIR="$ANSWER"
+        validate_skill_destination
+        if [ -e "$TARGET" ]; then
+            ask_yes_no "Replace the existing skill at ${TARGET}?" false
+            if [ "$ANSWER" = true ]; then FORCE=true; else INSTALL_SKILL=false; fi
+        fi
+    fi
+    ask_yes_no 'Prepare the MCP server? This installs missing locked Bun dependencies, builds the server, and prints JSON.' true
+    MCP="$ANSWER"
+    if [ "$MCP" = true ]; then
+        ask_path 'Annotation root' "$ANNOTATIONS_ROOT"
+        ANNOTATIONS_ROOT="$ANSWER"
+        ask_path 'FrameXML root' "$FRAMEXML_ROOT"
+        FRAMEXML_ROOT="$ANSWER"
+    fi
+    ask_yes_no 'Clone or update the optional local annotation repositories?' "$ANNOTATIONS"
+    ANNOTATIONS="$ANSWER"
 fi
 
-# -- Summary ----------------------------------------------------------------
+# Keep the original stdout for JSON; build and maintenance tools use stderr.
+exec 3>&1
+if [ "$MCP" = true ]; then exec 1>&2; fi
 
-echo ""
-echo "Done! ${INSTALLED} items installed, ${SKIPPED} skipped."
+if [ "$INSTALL_SKILL" = true ]; then
+    SOURCE="${SCRIPT_DIR}/skills/wow-addon"
+    [ -f "${SOURCE}/SKILL.md" ] || fail "Missing source skill: ${SOURCE}/SKILL.md. Use a complete repository checkout."
+    [ -z "$(find "$SOURCE" -type l -print -quit)" ] || fail "Source skill contains symbolic links: ${SOURCE}. Use regular files."
+    validate_skill_destination
+fi
 
-# -- Annotations (optional) -------------------------------------------------
+if [ "$MCP" = true ]; then
+    BUN_COMMAND="$(command -v bun)" || fail 'Bun is missing. Install Bun 1.3.12 or newer, then run the installer again.'
+    [ -f "${SCRIPT_DIR}/scripts/mcp-config.mjs" ] || fail 'Missing scripts/mcp-config.mjs. Use a complete repository checkout.'
+    "$BUN_COMMAND" "${SCRIPT_DIR}/scripts/mcp-config.mjs" --check-runtime || fail 'Bun 1.3.12 or newer is required. Select a supported Bun on PATH and run again.'
+    ANNOTATIONS_ROOT="$(WOW_ANNOTATIONS_ROOT="$ANNOTATIONS_ROOT" "$BUN_COMMAND" "${SCRIPT_DIR}/scripts/mcp-config.mjs" --annotations-root)" || fail 'The annotation root is invalid. Choose a valid directory path and run again.'
+    FRAMEXML_ROOT="$(WOW_FRAMEXML_ROOT="$FRAMEXML_ROOT" "$BUN_COMMAND" "${SCRIPT_DIR}/scripts/mcp-config.mjs" --framexml-root)" || fail 'The FrameXML root is invalid. Choose a valid directory path and run again.'
+    WOW_ANNOTATIONS_ROOT="$ANNOTATIONS_ROOT" WOW_FRAMEXML_ROOT="$FRAMEXML_ROOT" "$BUN_COMMAND" "${SCRIPT_DIR}/scripts/mcp-config.mjs" --check-prerequisites || fail 'MCP prerequisites are missing. Resolve the error above, then run the installer again.'
+fi
 
-is_annotations_ok=false
 if [ "$ANNOTATIONS" = true ]; then
-    echo ""
-    echo "Setting up annotations..."
-    if "${SCRIPT_DIR}/maintain-annotations.sh"; then
-        is_annotations_ok=true
+    WOW_ANNOTATIONS_ROOT="$ANNOTATIONS_ROOT" WOW_FRAMEXML_ROOT="$FRAMEXML_ROOT" bash "${SCRIPT_DIR}/maintain-annotations.sh" --check || fail 'Annotation destination check failed. Resolve the error above, then run the installer again.'
+fi
+
+if [ "$MCP" = true ]; then
+    if [ ! -f "${SCRIPT_DIR}/node_modules/@modelcontextprotocol/server/package.json" ] ||
+        { [ ! -f "${SCRIPT_DIR}/node_modules/.bin/tsc" ] && [ ! -f "${SCRIPT_DIR}/node_modules/.bin/tsc.cmd" ]; }; then
+        printf 'Installing locked Bun dependencies in %s\n' "$SCRIPT_DIR"
+        (cd "$SCRIPT_DIR" && "$BUN_COMMAND" ci) || fail 'Dependency installation failed. Resolve the bun ci error above, then run the installer again.'
+    fi
+    printf 'Building the MCP server in %s\n' "$SCRIPT_DIR"
+    (cd "$SCRIPT_DIR" && "$BUN_COMMAND" run build) || fail 'MCP build failed. Resolve the build error above, then run the installer again.'
+fi
+
+if [ "$INSTALL_SKILL" = true ]; then
+    if [ -e "$TARGET" ] && [ "$FORCE" = false ]; then
+        printf 'Skipped %s (already exists; use --force to replace).\n' "$TARGET"
     else
-        printf '%s\n' "${RED}✗${RESET} Annotation setup failed (config install succeeded - run maintain-annotations.sh manually)" >&2
+        mkdir -p "$SKILLS_DIR"
+        STAGING="$(mktemp -d "${SKILLS_DIR}/.wow-addon-install.XXXXXX")"
+        cleanup() {
+            if [ -d "${STAGING}/previous" ] && [ ! -e "$TARGET" ] && [ ! -L "$TARGET" ]; then
+                mv "${STAGING}/previous" "$TARGET" || return
+            fi
+            rm -rf "$STAGING"
+        }
+        trap cleanup EXIT
+        cp -R "$SOURCE" "${STAGING}/new"
+        if [ -d "$TARGET" ]; then
+            mv "$TARGET" "${STAGING}/previous"
+        fi
+        mv "${STAGING}/new" "$TARGET"
+        printf 'Installed %s\n' "$TARGET"
     fi
 fi
 
-# -- Annotation access for agents ---------------------------------------------
-# Agents read the annotation trees from arbitrary project directories, so
-# OpenCode needs external_directory read permission on BOTH annotation roots.
-# The config dir itself needs no entry - OpenCode always reads its own config.
-
-# Escape a string for use inside a JSON string literal. HOME may legally
-# contain quotes, backslashes, or control characters, and the emitted
-# permission block must stay copy-pasteable as valid JSON.
-json_escape() {
-    local s="$1" i ch esc
-    s=${s//\\/\\\\}
-    s=${s//\"/\\\"}
-    for ((i = 1; i < 32; i++)); do
-        printf -v ch "\\$(printf '%03o' "$i")"
-        printf -v esc '\\u%04x' "$i"
-        s=${s//"$ch"/"$esc"}
-    done
-    printf '%s' "$s"
-}
-
-if [ "$is_annotations_ok" = true ]; then
-    echo ""
-    echo "Annotation access for agents:"
-    echo 'Both entries below are required under "permission" in your opencode.json'
-    echo "(one per annotation directory - copy the block as-is):"
-    echo ""
-    printf '%s\n' "  \"external_directory\": {"
-    printf '%s\n' "    \"$(json_escape "${ANNOTATIONS_DIR}")/**\": \"allow\","
-    printf '%s\n' "    \"$(json_escape "${FRAMEXML_DIR}")/**\": \"allow\""
-    printf '%s\n' "  }"
+if [ "$ANNOTATIONS" = true ]; then
+    WOW_ANNOTATIONS_ROOT="$ANNOTATIONS_ROOT" WOW_FRAMEXML_ROOT="$FRAMEXML_ROOT" bash "${SCRIPT_DIR}/maintain-annotations.sh" || fail 'Annotation maintenance failed. Resolve the error above, then run the installer again.'
 fi
-
-# -- Next steps -------------------------------------------------------------
-
-echo ""
-echo "Next steps:"
-if [ "$is_annotations_ok" = true ]; then
-    echo "  1. See README.md for multi-flavor annotation details"
+if [ "$MCP" = true ]; then
+    MCP_JSON="$(WOW_ANNOTATIONS_ROOT="$ANNOTATIONS_ROOT" WOW_FRAMEXML_ROOT="$FRAMEXML_ROOT" "$BUN_COMMAND" "${SCRIPT_DIR}/scripts/mcp-config.mjs")" || fail 'MCP JSON could not be created. Resolve the error above, then run the installer again.'
+    printf 'Copy the JSON from stdout into your MCP client settings.\n' >&2
+    printf '%s\n' "$MCP_JSON" >&3
+elif [ "$INSTALL_SKILL" = true ]; then
+    printf 'Next: configure the local MCP server using README.md.\n'
 else
-    echo "  1. Set up annotations:"
-    echo "     ./maintain-annotations.sh"
-    echo "  2. See README.md for full setup instructions"
+    printf 'Setup finished. No MCP configuration was requested.\n'
 fi

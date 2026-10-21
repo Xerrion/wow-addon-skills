@@ -1,148 +1,76 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# uninstall.sh - Remove WoW addon config items from OpenCode config dir
-#
-# Removes the known files and directories installed by install.sh.
-# Use --yes to skip the confirmation prompt.
-# ---------------------------------------------------------------------------
+show_help() {
+    cat <<'HELP'
+Usage: ./uninstall.sh [--skills-dir DIR] [--yes]
 
-# -- Colors -----------------------------------------------------------------
+Remove only ~/.agents/skills/wow-addon. Local annotations and client
+configuration are preserved.
+  --skills-dir DIR  Absolute path to the parent skills directory
+  --yes             Skip the confirmation prompt
+  --help, -h        Show this help
+HELP
+}
 
-GREEN=$'\033[0;32m'
-RED=$'\033[0;31m'
-DIM=$'\033[0;90m'
-RESET=$'\033[0m'
-
-# -- Resolve paths ----------------------------------------------------------
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG_DIR="${HOME}/.config/opencode"
-
-# -- Parse flags ------------------------------------------------------------
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
 AUTO_YES=false
-for arg in "$@"; do
-    case "$arg" in
-        --yes) AUTO_YES=true ;;
-        *)
-            printf '%s\n' "${RED}✗${RESET} Unknown option: ${arg}" >&2
-            echo "Usage: $0 [--yes]" >&2
-            exit 1
-            ;;
+SKILLS_DIR="${HOME:?HOME must be set}/.agents/skills"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --help|-h) show_help; exit 0 ;;
+        --yes) AUTO_YES=true; shift ;;
+        --skills-dir)
+            [ "$#" -ge 2 ] && [ -n "$2" ] || fail '--skills-dir requires an absolute directory path.'
+            SKILLS_DIR="$2"; shift 2 ;;
+        *) fail "Unknown option: $1. Run ./uninstall.sh --help." ;;
     esac
 done
 
-# -- State ------------------------------------------------------------------
-
-REMOVED=0
-
-# -- Guard: nothing to do if config dir missing -----------------------------
-
-if [ ! -d "$CONFIG_DIR" ]; then
-    echo "Nothing to do - OpenCode config directory does not exist."
+SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd -P)"
+case "$SKILLS_DIR" in /*) ;; *) fail '--skills-dir must be an absolute directory path.' ;; esac
+case "$SKILLS_DIR" in *$'\n'*) fail 'The skills directory path must not contain a newline.' ;; esac
+NORMALIZED=""
+IFS='/' read -r -a PARTS <<< "$SKILLS_DIR"
+for PART in "${PARTS[@]}"; do
+    [ -n "$PART" ] || continue
+    case "$PART" in .|..) fail 'Use an absolute skills directory without . or .. path components.' ;; esac
+    NORMALIZED="${NORMALIZED}/${PART}"
+    [ ! -L "$NORMALIZED" ] || fail "Symbolic links are not supported in the skills path: ${NORMALIZED}. Use the physical directory path."
+done
+SKILLS_DIR="${NORMALIZED:-/}"
+HOME_DIR="$(cd -P "$HOME" && pwd -P)"
+[ "$SKILLS_DIR" != / ] && [ "$SKILLS_DIR" != "$HOME_DIR" ] || fail 'Choose a dedicated skills directory, not a filesystem root or home directory.'
+TARGET="${SKILLS_DIR}/wow-addon"
+[ ! -L "$TARGET" ] || fail "Refusing to remove a symbolic link: ${TARGET}. Remove the link yourself first."
+# Compare directory identities because path casing can vary on the same volume.
+within_directory() {
+    local candidate="$1" ancestor="$2"
+    while :; do
+        if [ "$candidate" -ef "$ancestor" ]; then return 0; fi
+        [ "$candidate" != / ] || return 1
+        candidate="${candidate%/*}"
+        candidate="${candidate:-/}"
+    done
+}
+if within_directory "$TARGET" "$SCRIPT_DIR" || within_directory "$SCRIPT_DIR" "$TARGET"; then
+    fail 'The uninstall destination overlaps the source skill or repository. Choose the installed skills directory.'
+fi
+if [ ! -e "$TARGET" ]; then
+    printf 'Already absent: %s\n' "$TARGET"
     exit 0
 fi
-
-# -- Confirmation prompt ----------------------------------------------------
+[ -d "$TARGET" ] || fail "The skill destination is not a directory: ${TARGET}. Move it yourself first."
 
 if [ "$AUTO_YES" = false ]; then
-    printf "This will remove WoW addon config items from ~/.config/opencode/. Continue? [y/N] "
-    read -r answer
-    case "$answer" in
-        [yY]|[yY][eE][sS]) ;;
-        *)
-            echo "Aborted."
-            exit 0
-            ;;
+    printf 'Remove %s? [y/N] ' "$TARGET"
+    ANSWER=""
+    read -r ANSWER || true
+    case "$ANSWER" in
+        y|Y|yes|YES|Yes) ;;
+        *) printf 'Aborted.\n'; exit 0 ;;
     esac
 fi
-
-# -- Removal helper ---------------------------------------------------------
-
-remove_item() {
-    local subdir="$1" name="$2" kind="$3"  # kind: "file" or "dir"
-    local path="${CONFIG_DIR}/${subdir}/${name}"
-
-    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
-        return 0
-    fi
-
-    if [ "$kind" = "dir" ]; then
-        rm -rf "$path"
-    else
-        rm -f "$path"
-    fi
-    printf '%s\n' "${GREEN}✓${RESET} Removed ${subdir}/${name}"
-    REMOVED=$((REMOVED + 1))
-}
-
-# -- Agents -----------------------------------------------------------------
-
-echo "Agents:"
-if [ -d "${SCRIPT_DIR}/agents" ]; then
-    while IFS= read -r file; do
-        name="$(basename "$file")"
-        remove_item "agents" "$name" "file"
-        remove_item "agent" "$name" "file"
-    done < <(find "${SCRIPT_DIR}/agents" -maxdepth 1 -type f -name "*.md" | sort)
-fi
-
-# -- Skills -----------------------------------------------------------------
-
-echo ""
-echo "Skills:"
-if [ -d "${SCRIPT_DIR}/skills" ]; then
-    while IFS= read -r dir; do
-        name="$(basename "$dir")"
-        remove_item "skills" "$name" "dir"
-        remove_item "skill" "$name" "dir"
-    done < <(find "${SCRIPT_DIR}/skills" -mindepth 1 -maxdepth 1 -type d | sort)
-fi
-
-# -- Commands ---------------------------------------------------------------
-
-echo ""
-echo "Commands:"
-if [ -d "${SCRIPT_DIR}/commands" ]; then
-    while IFS= read -r file; do
-        name="$(basename "$file")"
-        remove_item "commands" "$name" "file"
-        remove_item "command" "$name" "file"
-    done < <(find "${SCRIPT_DIR}/commands" -maxdepth 1 -type f -name "*.md" | sort)
-fi
-
-# -- Tools ------------------------------------------------------------------
-# Mirror-mode: enumerate the .ts files this repo would install, and remove
-# their counterparts at the destination. Then prune now-empty subdirs (e.g.
-# data/, savedvars/) but leave the tools/ root and any unknown files alone.
-
-echo ""
-echo "Tools:"
-if [ -d "${SCRIPT_DIR}/tools" ]; then
-    while IFS= read -r file; do
-        rel="${file#${SCRIPT_DIR}/tools/}"
-        remove_item "tools" "$rel" "file"
-        remove_item "tool" "$rel" "file"
-    done < <(find "${SCRIPT_DIR}/tools" -type f -name "*.ts" \
-        -not -path "*/__tests__/*" -not -name "*.test.ts" | sort)
-
-    # Prune empty subdirectories under tools/ (rmdir refuses non-empty dirs,
-    # which is exactly the safety we want).
-    for subdir in tools tool; do
-        [ -d "${CONFIG_DIR}/${subdir}" ] || continue
-        for d in "${CONFIG_DIR}/${subdir}"/*/; do
-            [ -d "$d" ] || continue
-            if rmdir "$d" 2>/dev/null; then
-                printf '%s\n' "${GREEN}✓${RESET} Removed empty ${subdir}/$(basename "$d")/"
-                REMOVED=$((REMOVED + 1))
-            fi
-        done
-    done
-fi
-
-# -- Summary ----------------------------------------------------------------
-
-echo ""
-echo "Done! ${REMOVED} items removed."
+rm -rf "$TARGET"
+printf 'Removed %s\n' "$TARGET"
