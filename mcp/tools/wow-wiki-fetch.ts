@@ -117,13 +117,14 @@ function extractTitle(html: string): string {
   const h1 = /<h1\b[^>]*id\s*=\s*["']firstHeading["'][^>]*>([\s\S]*?)<\/h1>/i.exec(
     html,
   );
-  if (h1) {
-    const t = clean(h1[1]!);
+  const heading = h1?.[1];
+  if (heading !== undefined) {
+    const t = clean(heading);
     if (t.length > 0) return t;
   }
-  const t = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-  if (t) {
-    return clean(t[1]!).replace(/\s*[-|–—]\s*Warcraft Wiki.*$/i, "");
+  const title = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1];
+  if (title !== undefined) {
+    return clean(title).replace(/\s*[-|–—]\s*Warcraft Wiki.*$/i, "");
   }
   return "";
 }
@@ -151,8 +152,10 @@ function extractCategories(html: string): string[] {
   const re =
     /<a\s+[^>]*href\s*=\s*["'][^"']*\/wiki\/Category:([^"'#?]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   for (let m = re.exec(slice); m !== null; m = re.exec(slice)) {
+    const encodedName = m[1];
+    if (encodedName === undefined) continue;
     try {
-      const name = decodeURIComponent(m[1]!).replace(/_/g, " ");
+      const name = decodeURIComponent(encodedName).replace(/_/g, " ");
       if (!cats.includes(name)) cats.push(name);
     } catch {
       // Skip malformed escape sequences.
@@ -217,7 +220,8 @@ function stripBalancedElements(html: string, openingPattern: RegExp): string {
     opening !== null;
     opening = openingPattern.exec(html)
   ) {
-    const tag = opening[1]!;
+    const tag = opening[1];
+    if (tag === undefined) continue;
     const tagPattern = new RegExp(`<\\/?${tag}\\b[^>]*>`, "gi");
     tagPattern.lastIndex = opening.index + opening[0].length;
     let depth = 1;
@@ -268,10 +272,14 @@ function renderTable(body: string): string {
   const rows: string[][] = [];
   const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
   for (let tr = trRe.exec(body); tr !== null; tr = trRe.exec(body)) {
+    const rowBody = tr[1];
+    if (rowBody === undefined) continue;
     const cells: string[] = [];
     const cellRe = /<(t[hd])\b[^>]*>([\s\S]*?)<\/\1>/gi;
-    for (let c = cellRe.exec(tr[1]!); c !== null; c = cellRe.exec(tr[1]!)) {
-      cells.push(cleanInline(c[2]!).replace(/\|/g, "\\|"));
+    for (let c = cellRe.exec(rowBody); c !== null; c = cellRe.exec(rowBody)) {
+      const cellBody = c[2];
+      if (cellBody === undefined) continue;
+      cells.push(cleanInline(cellBody).replace(/\|/g, "\\|"));
     }
     if (cells.length > 0) rows.push(cells);
   }
@@ -292,8 +300,10 @@ function renderDl(body: string): string {
   const re = /<(dt|dd)\b[^>]*>([\s\S]*?)<\/\1>/gi;
   const parts: string[] = [];
   for (let m = re.exec(body); m !== null; m = re.exec(body)) {
+    const entryBody = m[2];
+    if (entryBody === undefined) continue;
     const tag = m[1]?.toLowerCase();
-    const text = cleanInline(m[2]!);
+    const text = cleanInline(entryBody);
     if (text.length === 0) continue;
     if (tag === "dt") parts.push(`**${text}**`);
     else parts.push(`: ${text}`);
@@ -305,7 +315,9 @@ function renderList(body: string, marker: string): string {
   const re = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
   const items: string[] = [];
   for (let m = re.exec(body); m !== null; m = re.exec(body)) {
-    const text = cleanInline(m[1]!);
+    const itemBody = m[1];
+    if (itemBody === undefined) continue;
+    const text = cleanInline(itemBody);
     if (text.length > 0) items.push(`${marker} ${text}`);
   }
   return items.length > 0 ? `\n${items.join("\n")}\n\n` : "";
@@ -323,8 +335,7 @@ export function renderHtml(html: string): string {
   s = s.replace(
     /<pre\b([^>]*)>([\s\S]*?)<\/pre>/gi,
     (_, attrs: string, body: string) => {
-      const langMatch = /mw-highlight-lang-(\w+)/.exec(attrs);
-      const lang = langMatch ? langMatch[1]! : "";
+      const lang = /mw-highlight-lang-(\w+)/.exec(attrs)?.[1] ?? "";
       const text = decodeEntities(stripTags(body))
         .replace(/\r\n?/g, "\n")
         .replace(/\s+$/, "");
@@ -339,7 +350,8 @@ export function renderHtml(html: string): string {
       /<span\b[^>]*class\s*=\s*["'][^"']*\bmw-headline\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(
         body,
       );
-    const text = span ? clean(span[1]!) : clean(body);
+    const heading = span?.[1];
+    const text = heading !== undefined ? clean(heading) : clean(body);
     return `\n\n### ${text}\n\n`;
   });
 
@@ -374,27 +386,33 @@ function segment(content: string): { lead: string; sections: Section[] } {
   const h2Re = /<h2\b[^>]*>([\s\S]*?)<\/h2>/gi;
   const matches: { idx: number; len: number; id: string; heading: string }[] = [];
   for (let m = h2Re.exec(content); m !== null; m = h2Re.exec(content)) {
-    const inner = m[1]!;
+    const inner = m[1];
+    if (inner === undefined) continue;
     const sp =
       /<span\b[^>]*class\s*=\s*["'][^"']*\bmw-headline\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(
         inner,
       );
     if (!sp) continue;
+    const heading = sp[1];
+    if (heading === undefined) continue;
     const idMatch = /\bid\s*=\s*["']([^"']+)["']/.exec(sp[0]);
-    if (!idMatch) continue;
+    const id = idMatch?.[1];
+    if (id === undefined) continue;
     matches.push({
       idx: m.index,
       len: m[0].length,
-      id: idMatch[1]!,
-      heading: clean(sp[1]!),
+      id,
+      heading: clean(heading),
     });
   }
-  if (matches.length === 0) return { lead: content, sections: [] };
-  const lead = content.slice(0, matches[0]?.idx);
+  const first = matches[0];
+  if (first === undefined) return { lead: content, sections: [] };
+  const lead = content.slice(0, first.idx);
   const sections: Section[] = [];
   for (let i = 0; i < matches.length; i++) {
-    const cur = matches[i]!;
-    const end = i + 1 < matches.length ? matches[i + 1]?.idx : content.length;
+    const cur = matches[i];
+    if (cur === undefined) continue;
+    const end = matches[i + 1]?.idx ?? content.length;
     sections.push({
       id: cur.id,
       heading: cur.heading,
@@ -589,7 +607,11 @@ function truncateUtf8(value: string, maxBytes: number): string {
   const bytes = Buffer.from(value, "utf8");
   if (bytes.length <= maxBytes) return value;
   let end = maxBytes;
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  while (end > 0) {
+    const byte = bytes[end];
+    if (byte === undefined || (byte & 0xc0) !== 0x80) break;
+    end--;
+  }
   return bytes.subarray(0, end).toString("utf8");
 }
 

@@ -36,15 +36,15 @@ Multiple `---@return` lines indicate multiple return values, in order. `?` after
 
 ## Multi-flavor reminder
 
-WoW publishes multiple flavors in parallel: Retail (live), Classic, Vanilla (Classic Era), Anniversary, plus PTR and beta variants. An API that exists in Retail may be missing, renamed, or have a different return-value count in a Classic flavor.
+WoW publishes multiple flavors in parallel: Retail (live), Classic, Vanilla (Classic Era), Anniversary, and Forever, plus PTR and beta variants. API availability and return values can differ across flavors.
 
-The source tool selects the local `live`, `classic`, `classic_era`, or `classic_anniversary` FrameXML worktree. API and event lookups use the shared Ketho catalog and do not take a flavor argument. Record the catalog or source version and verify it against the target client before claiming support. The wiki tool has no flavor selector; read each article's version notes.
+The source tool selects the local `live`, `classic`, `classic_era`, `classic_anniversary`, or independent `forever` FrameXML worktree. For example, use `{"pattern":"CreateFrame","flavor":"forever"}` to search Forever. API and event lookups use the shared Ketho catalog and do not take a flavor argument; a shared catalog result does not establish Forever compatibility. Record the catalog or source version and verify it against the target client before claiming support. The wiki tool has no flavor selector; read each article's version notes.
 
 ## Runtime version-guard idiom
 
 Addons gate code by flavor at runtime through `WOW_PROJECT_ID` and the `WOW_PROJECT_*` constants:
 
-- `WOW_PROJECT_MAINLINE`. Retail
+- `WOW_PROJECT_MAINLINE`. Used for Retail guards; verify the client, build, and actual capabilities before treating the guard as Retail-exclusive.
 - `WOW_PROJECT_CLASSIC`. Classic Era (Vanilla)
 - `WOW_PROJECT_CATACLYSM_CLASSIC`, `WOW_PROJECT_MISTS_CLASSIC`, `WOW_PROJECT_ANNIVERSARY_CLASSIC`. Successive Classic re-releases
 

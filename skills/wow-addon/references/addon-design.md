@@ -100,13 +100,13 @@ ALWAYS use the factory shape when the same logical handler must dispatch from di
 
 ## 3. Capability Gating
 
-Two mechanisms exist; they solve different problems.
+Two mechanisms exist; they solve different problems. `forever` is an independent source selector, not evidence of a matching project constant or packager token. Verify the client, build, and actual capabilities before using a Mainline guard for Retail-exclusive behavior.
 
 ### Runtime guards
 
 ```lua
 if WOW_PROJECT_ID == WOW_PROJECT_MAINLINE then
-    -- retail-only path
+    -- mainline path; verify the target client's project ID
 end
 ```
 

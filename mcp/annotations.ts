@@ -6,7 +6,7 @@ import { defaultDataRoot } from "./tools/runtime.ts";
 
 export const ANNOTATION_REFRESH_MS = 24 * 60 * 60 * 1000;
 const RETRY_MS = 60 * 60 * 1000;
-const FLAVORS = ["live", "classic", "classic_era", "classic_anniversary"];
+const FLAVORS = ["live", "classic", "classic_era", "classic_anniversary", "forever"];
 
 export function runAnnotationMaintenance(env: NodeJS.ProcessEnv, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {

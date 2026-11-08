@@ -35,9 +35,15 @@ const FLAVOR_ENUM = [
   "classic",
   "classic_anniversary",
   "classic_era",
+  "forever",
 ] as const;
 type FlavorArg = (typeof FLAVOR_ENUM)[number];
-type ResolvedFlavor = "live" | "classic" | "classic_anniversary" | "classic_era";
+type ResolvedFlavor =
+  | "live"
+  | "classic"
+  | "classic_anniversary"
+  | "classic_era"
+  | "forever";
 
 const SCOPE_ENUM = ["lua", "xml", "all"] as const;
 type Scope = (typeof SCOPE_ENUM)[number];
@@ -87,20 +93,20 @@ function parseRgLine(raw: string, absRoot: string): RgLine | null {
   const reMatch = /^(.+?):(\d+):(.*)$/;
   const reCtx = /^(.+?)-(\d+)-(.*)$/;
   let m = reMatch.exec(raw);
-  if (m) {
+  if (m && m[1] !== undefined && m[2] !== undefined && m[3] !== undefined) {
     return {
-      path: stripPathPrefix(m[1]!, absRoot),
-      line: Number(m[2]!),
-      text: m[3]!,
+      path: stripPathPrefix(m[1], absRoot),
+      line: Number(m[2]),
+      text: m[3],
       isMatch: true,
     };
   }
   m = reCtx.exec(raw);
-  if (m) {
+  if (m && m[1] !== undefined && m[2] !== undefined && m[3] !== undefined) {
     return {
-      path: stripPathPrefix(m[1]!, absRoot),
-      line: Number(m[2]!),
-      text: m[3]!,
+      path: stripPathPrefix(m[1], absRoot),
+      line: Number(m[2]),
+      text: m[3],
       isMatch: false,
     };
   }
@@ -204,7 +210,7 @@ function renderNoMatch(pattern: string, flavor: ResolvedFlavor, scope: Scope): s
     "",
     `No matches in ${relRoot} (scope: ${scope}).`,
     "",
-    "Try a different flavor (live | classic | classic_anniversary | classic_era),",
+    "Try a different flavor (live | classic | classic_anniversary | classic_era | forever),",
     'broaden scope to "all", or check the pattern syntax (ripgrep regex).',
     "",
   ].join("\n");
@@ -212,7 +218,7 @@ function renderNoMatch(pattern: string, flavor: ResolvedFlavor, scope: Scope): s
 
 export default defineTool({
   description:
-    "Ripgrep over the per-flavor WoW FrameXML annotated source tree (wow-framexml/<flavor>/Annotations/ under the platform data root: ~/.local/share on macOS/Linux, %LOCALAPPDATA% on Windows). Returns matched lines with 3 lines of context, capped at 5 matches per file and 40 KB total. Scope filters by *.lua.annotated.lua, *.xml.annotated.lua, or both.",
+    "Ripgrep over the per-flavor WoW FrameXML annotated source tree (wow-framexml/<flavor>/Annotations/ under the platform data root: ~/.local/share on macOS/Linux, %LOCALAPPDATA% on Windows). Forever uses its own source tree; retail aliases live. Returns matched lines with 3 lines of context, capped at 5 matches per file and 40 KB total. Scope filters by *.lua.annotated.lua, *.xml.annotated.lua, or both.",
   args: {
     pattern: z.string().min(1),
     flavor: z.enum(FLAVOR_ENUM).default("live"),

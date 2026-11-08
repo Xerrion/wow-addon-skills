@@ -32,9 +32,13 @@ async function fixture(t) {
       env.WOW_ANNOTATIONS_ROOT,
       "Annotations/Core/Blizzard_APIDocumentationGenerated",
     );
-    const sources = ["live", "classic", "classic_era", "classic_anniversary"].map(
-      (flavor) => join(env.WOW_FRAMEXML_ROOT, flavor, "Annotations"),
-    );
+    const sources = [
+      "live",
+      "classic",
+      "classic_era",
+      "classic_anniversary",
+      "forever",
+    ].map((flavor) => join(env.WOW_FRAMEXML_ROOT, flavor, "Annotations"));
     await Promise.all(
       [data, api, ...sources].map((path) => mkdir(path, { recursive: true })),
     );
@@ -233,6 +237,34 @@ test("missing or empty catalogs force repair even with a recent saved timestamp"
   assert.equal(f.runs(), 1);
   assert.equal(manager.status().ready, true);
 });
+
+for (const state of ["missing", "empty"]) {
+  test(`the existing four source trees stay unready with ${state} Forever annotations`, async (t) => {
+    const f = await fixture(t);
+    await f.populate();
+    await rm(join(f.env.WOW_FRAMEXML_ROOT, "forever"), {
+      recursive: true,
+    });
+    const forever = join(f.env.WOW_FRAMEXML_ROOT, "forever", "Annotations");
+    if (state === "empty") await mkdir(forever, { recursive: true });
+    await f.state(f.now());
+    const manager = f.manager({ run: async () => {} });
+    await manager.start();
+    await manager.refresh();
+    assert.equal(manager.status().ready, false);
+    assert.equal(manager.status().updateFailed, true);
+
+    await mkdir(forever, { recursive: true });
+    await writeFile(
+      join(forever, "Main.lua.annotated.lua"),
+      "function ForeverFixture() end\n",
+    );
+    await manager.refresh();
+    assert.equal(manager.status().ready, true);
+    assert.equal(manager.status().updateFailed, false);
+    assert.equal(manager.status().lastSuccess, f.now());
+  });
+}
 
 test("incomplete maintenance results never mark empty storage ready", async (t) => {
   const f = await fixture(t);
