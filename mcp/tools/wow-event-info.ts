@@ -56,19 +56,24 @@ function fenceFor(content: string): string {
 }
 
 function parseRows(raw: string): Row[] {
-  const lines = raw.split("\n");
   const rows: Row[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = LINE_RE.exec(lines[i]!);
+  let lineNo = 0;
+  for (const line of raw.split("\n")) {
+    lineNo++;
+    const m = LINE_RE.exec(line);
     if (m) {
+      const name = m[1];
+      if (name === undefined) {
+        throw new Error(`malformed event row at line ${lineNo}`);
+      }
       rows.push({
-        lineNo: i + 1,
-        name: m[1]!,
+        lineNo,
+        name,
         payload: m[2] ?? null,
-        raw: lines[i]!,
+        raw: line,
       });
-    } else if (lines[i]?.startsWith('---|"')) {
-      throw new Error(`malformed event row at line ${i + 1}`);
+    } else if (line.startsWith('---|"')) {
+      throw new Error(`malformed event row at line ${lineNo}`);
     }
   }
   if (rows.length === 0) {
@@ -81,7 +86,11 @@ export function truncateUtf8(value: string, maxBytes: number): string {
   const bytes = Buffer.from(value, "utf8");
   if (bytes.length <= maxBytes) return value;
   let end = maxBytes;
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  while (end > 0) {
+    const byte = bytes[end];
+    if (byte === undefined || (byte & 0xc0) !== 0x80) break;
+    end--;
+  }
   return bytes.subarray(0, end).toString("utf8");
 }
 
@@ -106,14 +115,20 @@ function familyBounds(rows: Row[], idx: number): { lo: number; hi: number } {
   let hi = idx;
   let above = 0;
   while (lo > 0 && above < FAMILY_LINE_CAP) {
-    const candidate = rows[lo - 1]!;
+    const candidate = rows[lo - 1];
+    if (!candidate) {
+      throw new Error("wow-event-info: family event index is out of range");
+    }
     if (familyPrefix(candidate.name) !== prefix) break;
     lo--;
     above++;
   }
   let below = 0;
   while (hi < rows.length - 1 && below < FAMILY_LINE_CAP) {
-    const candidate = rows[hi + 1]!;
+    const candidate = rows[hi + 1];
+    if (!candidate) {
+      throw new Error("wow-event-info: family event index is out of range");
+    }
     if (familyPrefix(candidate.name) !== prefix) break;
     hi++;
     below++;
@@ -122,7 +137,8 @@ function familyBounds(rows: Row[], idx: number): { lo: number; hi: number } {
 }
 
 function renderMatch(event: string, rows: Row[], idx: number): string {
-  const row = rows[idx]!;
+  const row = rows[idx];
+  if (!row) throw new Error("wow-event-info: matched event index is out of range");
   const prefix = familyPrefix(row.name);
   let { lo, hi } = familyBounds(rows, idx);
 

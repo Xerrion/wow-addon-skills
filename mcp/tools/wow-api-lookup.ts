@@ -236,20 +236,20 @@ function parseRgLine(raw: string): RgLine | null {
   const reMatch = /^(.+?):(\d+):(.*)$/;
   const reCtx = /^(.+?)-(\d+)-(.*)$/;
   let m = reMatch.exec(raw);
-  if (m) {
+  if (m && m[1] !== undefined && m[2] !== undefined && m[3] !== undefined) {
     return {
-      path: stripAbsPrefix(m[1]!),
-      line: Number(m[2]!),
-      text: m[3]!,
+      path: stripAbsPrefix(m[1]),
+      line: Number(m[2]),
+      text: m[3],
       isMatch: true,
     };
   }
   m = reCtx.exec(raw);
-  if (m) {
+  if (m && m[1] !== undefined && m[2] !== undefined && m[3] !== undefined) {
     return {
-      path: stripAbsPrefix(m[1]!),
-      line: Number(m[2]!),
-      text: m[3]!,
+      path: stripAbsPrefix(m[1]),
+      line: Number(m[2]),
+      text: m[3],
       isMatch: false,
     };
   }
@@ -389,10 +389,11 @@ async function tryClassicOverride(query: string): Promise<string | null> {
     const lines = raw.split("\n");
     const sigRe = new RegExp(`^function\\s+${escapeRegex(query)}\\s*\\(`);
     for (let i = 0; i < lines.length; i++) {
-      if (sigRe.test(lines[i]!)) {
+      const line = lines[i];
+      if (line !== undefined && sigRe.test(line)) {
         // Walk back to gather the annotation block.
         let lo = i;
-        while (lo > 0 && /^---/.test(lines[lo - 1]!)) lo--;
+        while (lo > 0 && lines[lo - 1]?.startsWith("---")) lo--;
         const chunk = lines.slice(lo, i + 1).join("\n");
         const fence = fenceFor(chunk);
         return (

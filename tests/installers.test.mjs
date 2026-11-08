@@ -15,13 +15,19 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repository = fileURLToPath(new URL("..", import.meta.url));
 const gitExecutable =
   process.platform === "win32"
     ? ""
     : spawnSync("sh", ["-c", "command -v git"], {
+        encoding: "utf8",
+      }).stdout.trim();
+const powerShellExecutable =
+  process.platform === "win32"
+    ? ""
+    : spawnSync("sh", ["-c", "command -v pwsh"], {
         encoding: "utf8",
       }).stdout.trim();
 
@@ -33,7 +39,12 @@ function fixture(t, repositoryDirectory = "repo") {
   const repo = path.join(root, repositoryDirectory);
   const bin = path.join(root, "bin");
   for (const directory of [home, repo, bin]) mkdirSync(directory, { recursive: true });
-  for (const file of ["install.sh", "uninstall.sh", "maintain-annotations.sh"])
+  for (const file of [
+    "install.sh",
+    "uninstall.sh",
+    "maintain-annotations.sh",
+    "maintain-annotations.ps1",
+  ])
     cpSync(path.join(repository, file), path.join(repo, file));
   mkdirSync(path.join(repo, "scripts"));
   cpSync(
@@ -63,7 +74,12 @@ function fixture(t, repositoryDirectory = "repo") {
     skill: path.join(home, ".agents/skills/wow-addon"),
     unexpectedCommand,
     run(script, args = [], input = "", environment = {}) {
-      const result = spawnSync("bash", [path.join(repo, script), ...args], {
+      const isPowerShell = script.endsWith(".ps1");
+      const command = isPowerShell ? powerShellExecutable : "bash";
+      const commandArgs = isPowerShell
+        ? ["-NoProfile", "-NonInteractive", "-File", path.join(repo, script), ...args]
+        : [path.join(repo, script), ...args];
+      const result = spawnSync(command, commandArgs, {
         cwd: root,
         encoding: "utf8",
         input,
@@ -143,31 +159,35 @@ fi
   }
 }
 
+function runGit(f, args) {
+  const result = spawnSync(gitExecutable, args, {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: path.join(f.root, "no-global-git-config"),
+      GIT_CONFIG_NOSYSTEM: "1",
+    },
+  });
+  succeeds(result);
+  return result.stdout.trim();
+}
+
 function repositoryAt(f, directory, origin, { bare = false, branch } = {}) {
-  const run = (args) => {
-    const result = spawnSync(gitExecutable, args, {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        GIT_CONFIG_GLOBAL: path.join(f.root, "no-global-git-config"),
-        GIT_CONFIG_NOSYSTEM: "1",
-      },
-    });
-    succeeds(result);
-  };
-  run(["init", "--quiet", ...(bare ? ["--bare"] : []), directory]);
-  if (origin) run(["-C", directory, "config", "remote.origin.url", origin]);
-  if (branch) run(["-C", directory, "symbolic-ref", "HEAD", `refs/heads/${branch}`]);
+  runGit(f, ["init", "--quiet", ...(bare ? ["--bare"] : []), directory]);
+  if (origin) runGit(f, ["-C", directory, "config", "remote.origin.url", origin]);
+  if (branch)
+    runGit(f, ["-C", directory, "symbolic-ref", "HEAD", `refs/heads/${branch}`]);
 }
 
 function readonlyGit(f) {
   writeFileSync(
     path.join(f.bin, "git"),
     `#!/bin/sh
-if [ "$1" = -C ]; then
+if [ "$1" = -C ] || [ "$1" = --git-dir ]; then
   case "$3" in
     config|rev-parse) exec "$REAL_GIT" "$@" ;;
     branch) [ "$4" != --show-current ] || exec "$REAL_GIT" "$@" ;;
+    remote) [ "$4" != get-url ] || exec "$REAL_GIT" "$@" ;;
   esac
 fi
 printf '%s\\n' "$*" >> "$GIT_MUTATION_LOG"
@@ -699,7 +719,11 @@ describe("annotation maintenance preflight (Bash)", {
     const f = fixture(t);
     readonlyGit(f);
     symlinkSync("/bin/bash", path.join(f.bin, "bash"));
-    for (const args of [["--check"], ["--check", "--flavor", "classic_era"]]) {
+    for (const args of [
+      ["--check"],
+      ["--check", "--flavor", "classic_era"],
+      ["--check", "--flavor", "forever"],
+    ]) {
       succeeds(f.run("maintain-annotations.sh", args, "", roots(f)));
     }
     assert.equal(existsSync(path.join(f.root, "git-mutation-log")), false);
@@ -915,3 +939,377 @@ describe("annotation maintenance preflight (Bash)", {
     assert.equal(existsSync(path.join(f.home, ".local")), false);
   });
 });
+
+const framexmlBranches = {
+  live: "live-mix-into-source",
+  classic: "classic-mix-into-source",
+  classic_era: "classic_era-mix-into-source",
+  classic_anniversary: "classic_anniversary-mix-into-source",
+  forever: "forever-mix-into-source",
+};
+
+function commitFixture(f, directory) {
+  runGit(f, ["-C", directory, "add", "."]);
+  runGit(f, [
+    "-C",
+    directory,
+    "-c",
+    "user.name=Installer Test",
+    "-c",
+    "user.email=installer@example.invalid",
+    "commit",
+    "--quiet",
+    "-m",
+    "fixture",
+  ]);
+}
+
+function annotationUpstreams(f) {
+  const ketho = path.join(f.root, "ketho-upstream");
+  const framexml = path.join(f.root, "framexml-upstream");
+  repositoryAt(f, ketho);
+  put(path.join(ketho, "Annotations/Core/Fixture.lua"), "shared annotations\n");
+  commitFixture(f, ketho);
+  repositoryAt(f, framexml);
+  put(path.join(framexml, "Annotations/Fixture.lua"), "framexml annotations\n");
+  commitFixture(f, framexml);
+  for (const branch of Object.values(framexmlBranches))
+    runGit(f, ["-C", framexml, "branch", branch]);
+
+  const config = path.join(f.root, "upstream-git-config");
+  for (const [remote, source] of [
+    ["https://github.com/Ketho/vscode-wow-api", ketho],
+    ["https://github.com/NumyAddon/FramexmlAnnotations.git", framexml],
+  ]) {
+    runGit(f, [
+      "config",
+      "--file",
+      config,
+      `url.${pathToFileURL(source).href}.insteadOf`,
+      remote,
+    ]);
+  }
+  // Keep origin preflight on canonical URLs; rewrite only Git transport commands.
+  writeFileSync(
+    path.join(f.bin, "git"),
+    `#!/bin/sh
+command="$1"
+if [ "$1" = -C ] || [ "$1" = --git-dir ]; then command="$3"; fi
+case "$command" in
+  clone|fetch|pull|submodule) export GIT_CONFIG_GLOBAL="$UPSTREAM_GIT_CONFIG" ;;
+esac
+exec "$REAL_GIT" "$@"
+`,
+    { mode: 0o755 },
+  );
+  return {
+    framexml,
+    env: {
+      WOW_ANNOTATIONS_ROOT: path.join(f.root, "annotations"),
+      WOW_FRAMEXML_ROOT: path.join(f.root, "framexml"),
+      GIT_CONFIG_GLOBAL: path.join(f.root, "no-global-git-config"),
+      UPSTREAM_GIT_CONFIG: config,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_ALLOW_PROTOCOL: "file",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  };
+}
+
+for (const { name, script, flavorFlag, helpFlag, unavailable } of [
+  {
+    name: "Bash",
+    script: "maintain-annotations.sh",
+    flavorFlag: "--flavor",
+    helpFlag: "--help",
+    unavailable: false,
+  },
+  {
+    name: "PowerShell",
+    script: "maintain-annotations.ps1",
+    flavorFlag: "-Flavor",
+    helpFlag: "-Help",
+    unavailable: !powerShellExecutable,
+  },
+]) {
+  describe(`Forever annotation maintenance (${name})`, {
+    skip: process.platform === "win32" || unavailable,
+  }, () => {
+    test("default runs include every supported flavor and accept their existing worktrees again", (t) => {
+      const f = fixture(t);
+      const { env } = annotationUpstreams(f);
+      for (let run = 0; run < 2; run++) {
+        succeeds(f.run(script, [], "", env));
+        for (const [flavor, branch] of Object.entries(framexmlBranches)) {
+          const worktree = path.join(env.WOW_FRAMEXML_ROOT, flavor);
+          assert.equal(runGit(f, ["-C", worktree, "branch", "--show-current"]), branch);
+          assert.equal(
+            contents(path.join(worktree, "Annotations/Fixture.lua")),
+            "framexml annotations\n",
+          );
+        }
+      }
+    });
+
+    test("selected Forever creates and updates only Forever, leaving another flavor's local branch untouched", (t) => {
+      const f = fixture(t);
+      const { env, framexml } = annotationUpstreams(f);
+      const live = path.join(env.WOW_FRAMEXML_ROOT, "live");
+      repositoryAt(f, live, "https://github.com/NumyAddon/FramexmlAnnotations.git", {
+        branch: "local-live-work",
+      });
+      const localFile = path.join(live, "Annotations/Local.lua");
+      put(localFile, "preserve local live annotations\n");
+      const liveConfig = contents(path.join(live, ".git/config"));
+
+      succeeds(f.run(script, [flavorFlag, "forever"], "", env));
+      const forever = path.join(env.WOW_FRAMEXML_ROOT, "forever");
+      assert.equal(
+        runGit(f, ["-C", forever, "branch", "--show-current"]),
+        "forever-mix-into-source",
+      );
+      assert.equal(
+        contents(path.join(forever, "Annotations/Fixture.lua")),
+        "framexml annotations\n",
+      );
+      runGit(f, ["-C", framexml, "checkout", "--quiet", "forever-mix-into-source"]);
+      put(
+        path.join(framexml, "Annotations/Fixture.lua"),
+        "updated forever annotations\n",
+      );
+      commitFixture(f, framexml);
+
+      succeeds(f.run(script, [flavorFlag, "forever"], "", env));
+      assert.equal(
+        contents(path.join(forever, "Annotations/Fixture.lua")),
+        "updated forever annotations\n",
+      );
+      assert.equal(contents(localFile), "preserve local live annotations\n");
+      assert.equal(contents(path.join(live, ".git/config")), liveConfig);
+      assert.equal(
+        runGit(f, ["-C", live, "branch", "--show-current"]),
+        "local-live-work",
+      );
+      for (const flavor of ["classic", "classic_era", "classic_anniversary"])
+        assert.equal(existsSync(path.join(env.WOW_FRAMEXML_ROOT, flavor)), false);
+    });
+
+    test("an existing bare installation discovers a new Forever branch without updating unselected refs or worktrees", (t) => {
+      const f = fixture(t);
+      const { env, framexml } = annotationUpstreams(f);
+      const original = runGit(f, ["-C", framexml, "rev-parse", "HEAD"]);
+      runGit(f, ["-C", framexml, "branch", "-D", "forever-mix-into-source"]);
+      succeeds(f.run(script, [flavorFlag, "live"], "", env));
+      const bare = path.join(env.WOW_FRAMEXML_ROOT, ".bare");
+      const refs = [
+        "-C",
+        bare,
+        "for-each-ref",
+        "--format=%(refname) %(objectname)",
+        "refs/heads",
+      ];
+      const originalRefs = runGit(f, refs);
+      assert.doesNotMatch(originalRefs, /refs\/heads\/forever-mix-into-source /);
+      const live = path.join(env.WOW_FRAMEXML_ROOT, "live");
+      const liveHead = runGit(f, ["-C", live, "rev-parse", "HEAD"]);
+      const marker = path.join(live, "local.txt");
+      put(marker, "preserve local live data\n");
+
+      runGit(f, ["-C", framexml, "checkout", "--quiet", "live-mix-into-source"]);
+      put(
+        path.join(framexml, "Annotations/Fixture.lua"),
+        "new upstream live annotations\n",
+      );
+      commitFixture(f, framexml);
+      runGit(f, [
+        "-C",
+        framexml,
+        "checkout",
+        "--quiet",
+        "-b",
+        "forever-mix-into-source",
+        original,
+      ]);
+      put(
+        path.join(framexml, "Annotations/Fixture.lua"),
+        "new upstream forever annotations\n",
+      );
+      commitFixture(f, framexml);
+
+      succeeds(f.run(script, [flavorFlag, "forever"], "", env));
+      const forever = path.join(env.WOW_FRAMEXML_ROOT, "forever");
+      assert.equal(
+        runGit(f, ["-C", forever, "branch", "--show-current"]),
+        "forever-mix-into-source",
+      );
+      assert.equal(
+        contents(path.join(forever, "Annotations/Fixture.lua")),
+        "new upstream forever annotations\n",
+      );
+      assert.equal(
+        runGit(f, refs)
+          .split("\n")
+          .filter((ref) => !ref.startsWith("refs/heads/forever-mix-into-source "))
+          .join("\n"),
+        originalRefs,
+      );
+      assert.equal(runGit(f, ["-C", live, "rev-parse", "HEAD"]), liveHead);
+      assert.equal(
+        contents(path.join(live, "Annotations/Fixture.lua")),
+        "framexml annotations\n",
+      );
+      assert.equal(contents(marker), "preserve local live data\n");
+      for (const flavor of ["classic", "classic_era", "classic_anniversary"])
+        assert.equal(existsSync(path.join(env.WOW_FRAMEXML_ROOT, flavor)), false);
+    });
+
+    test("creating Forever refuses to overwrite a divergent cached branch", (t) => {
+      const f = fixture(t);
+      const { env, framexml } = annotationUpstreams(f);
+      succeeds(f.run(script, [flavorFlag, "live"], "", env));
+      const bare = path.join(env.WOW_FRAMEXML_ROOT, ".bare");
+      const local = path.join(f.root, "local-forever");
+      runGit(f, [
+        "-C",
+        bare,
+        "worktree",
+        "add",
+        "--quiet",
+        local,
+        "forever-mix-into-source",
+      ]);
+      put(path.join(local, "Annotations/Fixture.lua"), "local forever annotations\n");
+      commitFixture(f, local);
+      const localHead = runGit(f, ["-C", local, "rev-parse", "HEAD"]);
+      runGit(f, ["-C", bare, "worktree", "remove", local]);
+      runGit(f, ["-C", framexml, "checkout", "--quiet", "forever-mix-into-source"]);
+      put(
+        path.join(framexml, "Annotations/Fixture.lua"),
+        "divergent upstream forever annotations\n",
+      );
+      commitFixture(f, framexml);
+
+      const result = f.run(script, [flavorFlag, "forever"], "", env);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stdout + result.stderr, /non-fast-forward/);
+      assert.equal(
+        runGit(f, ["-C", bare, "rev-parse", "refs/heads/forever-mix-into-source"]),
+        localHead,
+      );
+      assert.equal(existsSync(path.join(env.WOW_FRAMEXML_ROOT, "forever")), false);
+      assert.equal(
+        contents(path.join(env.WOW_FRAMEXML_ROOT, "live/Annotations/Fixture.lua")),
+        "framexml annotations\n",
+      );
+    });
+
+    test("default and selected runs reject a wrong Forever branch before any repository update", (t) => {
+      for (const args of [[], [flavorFlag, "forever"]]) {
+        const f = fixture(t);
+        const env = {
+          WOW_ANNOTATIONS_ROOT: path.join(f.root, "annotations"),
+          WOW_FRAMEXML_ROOT: path.join(f.root, "framexml"),
+        };
+        repositoryAt(
+          f,
+          env.WOW_ANNOTATIONS_ROOT,
+          "https://github.com/Ketho/vscode-wow-api",
+        );
+        repositoryAt(
+          f,
+          path.join(env.WOW_FRAMEXML_ROOT, ".bare"),
+          "https://github.com/NumyAddon/FramexmlAnnotations.git",
+          { bare: true },
+        );
+        const forever = path.join(env.WOW_FRAMEXML_ROOT, "forever");
+        repositoryAt(
+          f,
+          forever,
+          "https://github.com/NumyAddon/FramexmlAnnotations.git",
+          {
+            branch: "live-mix-into-source",
+          },
+        );
+        const marker = path.join(forever, "local.txt");
+        put(marker, "preserve");
+        readonlyGit(f);
+
+        const result = f.run(script, args, "", env);
+        assert.notEqual(result.status, 0);
+        assert.match(
+          result.stdout + result.stderr,
+          /[Ee]xpected 'forever-mix-into-source'/,
+        );
+        assert.equal(contents(marker), "preserve");
+        assert.equal(existsSync(path.join(f.root, "git-mutation-log")), false);
+      }
+    });
+
+    test("missing upstream Forever branch fails instead of using another flavor or a cached branch", (t) => {
+      for (const cached of [false, true]) {
+        const f = fixture(t);
+        const { env, framexml } = annotationUpstreams(f);
+        if (cached) succeeds(f.run(script, [flavorFlag, "live"], "", env));
+        runGit(f, ["-C", framexml, "branch", "-D", "forever-mix-into-source"]);
+
+        const result = f.run(script, [flavorFlag, "forever"], "", env);
+        assert.notEqual(result.status, 0);
+        assert.match(result.stdout + result.stderr, /forever-mix-into-source/);
+        assert.ok(existsSync(path.join(env.WOW_FRAMEXML_ROOT, ".bare/HEAD")));
+        for (const flavor of [
+          "forever",
+          "classic",
+          "classic_era",
+          "classic_anniversary",
+        ])
+          assert.equal(existsSync(path.join(env.WOW_FRAMEXML_ROOT, flavor)), false);
+        const live = path.join(env.WOW_FRAMEXML_ROOT, "live");
+        assert.equal(existsSync(live), cached);
+        if (cached)
+          assert.equal(
+            contents(path.join(live, "Annotations/Fixture.lua")),
+            "framexml annotations\n",
+          );
+      }
+    });
+
+    test("help advertises Forever and invalid flavor names reject before any Git operation", (t) => {
+      const f = fixture(t);
+      const help = f.run(script, [helpFlag]);
+      succeeds(help);
+      assert.match(help.stdout, /[Vv]alid:.*forever|Supported flavors:.*forever/);
+      for (const flavor of ["forever-extra", "../forever"]) {
+        const result = f.run(script, [flavorFlag, flavor]);
+        assert.notEqual(result.status, 0);
+        assert.match(result.stdout + result.stderr, /Unknown flavor/);
+        assert.match(
+          result.stdout + result.stderr,
+          /(?:Supported|Valid) flavors:.*\bforever\b/,
+        );
+      }
+      assert.equal(existsSync(f.unexpectedCommand), false);
+      assert.equal(existsSync(path.join(f.home, ".local")), false);
+    });
+
+    test("selected Forever reports missing Git before creating annotation directories", (t) => {
+      const f = fixture(t);
+      rmSync(path.join(f.bin, "git"));
+      symlinkSync("/bin/bash", path.join(f.bin, "bash"));
+      symlinkSync("/usr/bin/dirname", path.join(f.bin, "dirname"));
+      const env = {
+        WOW_ANNOTATIONS_ROOT: path.join(f.root, "annotations"),
+        WOW_FRAMEXML_ROOT: path.join(f.root, "framexml"),
+        PATH: f.bin,
+      };
+      const result = f.run(script, [flavorFlag, "forever"], "", env);
+      assert.notEqual(result.status, 0);
+      assert.match(
+        result.stdout + result.stderr,
+        /Git is missing|git is not installed/,
+      );
+      assert.equal(existsSync(env.WOW_ANNOTATIONS_ROOT), false);
+      assert.equal(existsSync(env.WOW_FRAMEXML_ROOT), false);
+      assert.equal(existsSync(f.unexpectedCommand), false);
+    });
+  });
+}

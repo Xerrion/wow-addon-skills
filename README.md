@@ -11,7 +11,7 @@ API, event, and Blizzard source lookups read files on the machine running the se
 | [WoW addon skill](skills/wow-addon/SKILL.md)       | Addon design, Lua patterns, events, frames, SavedVariables, packaging, and research references |
 | [Research agent instructions](agents/wow-addon.md) | Optional read-only specialist instructions in plain Markdown                                   |
 | [MCP tools](mcp/tools/)                            | API signatures, exact event payloads, wiki articles, and per-flavor Blizzard source searches   |
-| Annotation maintenance scripts                     | Set up and update local annotations for Retail and Classic flavors                             |
+| Annotation maintenance scripts                     | Set up and update local annotations for Retail, Classic, and Forever flavors                   |
 
 ## Interactive setup
 
@@ -62,7 +62,7 @@ The setup follows [BetterCLI's help guidance](https://bettercli.org/design/cli-h
 
 Run `bun run start:http` after building to serve MCP at `/mcp`, a liveness check at `/health`, and readiness at `/ready`. Set `WOW_MCP_TOKEN` to a secret of at least 32 characters first. HTTP binds to `127.0.0.1:3000` by default. Set `WOW_MCP_HOST=0.0.0.0` and `WOW_MCP_PUBLIC_URL=https://your-domain` behind an HTTPS reverse proxy.
 
-HTTP startup installs the shared API annotations and all four FrameXML flavors automatically. The server refreshes them every 24 hours and saves the successful refresh time beside the data, so restarts preserve the schedule. MCP requests wait with `503` until the initial data is ready. Failed refreshes keep existing local data available and retry after one hour. Set `WOW_MCP_MANAGE_ANNOTATIONS=false` only when you manage the annotation files separately. Automatic maintenance needs Git and Bash on macOS/Linux, or Windows PowerShell on Windows; the container includes its prerequisites.
+HTTP startup installs the shared API annotations and all five FrameXML flavors automatically. The server refreshes them every 24 hours and saves the successful refresh time beside the data, so restarts preserve the schedule. MCP requests wait with `503` until the initial data is ready. Failed refreshes keep existing local data available and retry after one hour. Set `WOW_MCP_MANAGE_ANNOTATIONS=false` only when you manage the annotation files separately. Automatic maintenance needs Git and Bash on macOS/Linux, or Windows PowerShell on Windows; the container includes its prerequisites.
 
 The [Coolify setup guide](docs/coolify.md) covers deployment with the included [Dockerfile](Dockerfile) and [Compose file](compose.yaml), persistent annotation data, and client settings. Inside the configured container, `bun run config:http` prints complete MCP JSON containing the public URL and bearer token. Treat this output as a secret. An [HTTP configuration example](examples/mcp-http.json) is also available.
 
@@ -102,6 +102,7 @@ The maintenance scripts honor the same `WOW_ANNOTATIONS_ROOT` and `WOW_FRAMEXML_
   classic/Annotations/
   classic_era/Annotations/
   classic_anniversary/Annotations/
+  forever/Annotations/
 ```
 
 | Flavor argument       | FrameXML directory    |
@@ -110,10 +111,11 @@ The maintenance scripts honor the same `WOW_ANNOTATIONS_ROOT` and `WOW_FRAMEXML_
 | `classic`             | `classic`             |
 | `classic_era`         | `classic_era`         |
 | `classic_anniversary` | `classic_anniversary` |
+| `forever`             | `forever`             |
 
-The source tool supports `scope: "lua"`, `"xml"`, or `"all"`. It searches annotated files, with bounded context and match counts. The API and event tools use the shared Ketho catalog and do not accept a flavor argument. Confirm the target client's build and source version before making compatibility claims.
+The source tool supports `scope: "lua"`, `"xml"`, or `"all"`. It searches annotated files, with bounded context and match counts. For example, pass `{"pattern":"CreateFrame","flavor":"forever"}` to search the independent Forever worktree. The API and event tools use the shared Ketho catalog and do not accept a flavor argument; a result there does not establish Forever compatibility. Confirm the target client's build and source version before making compatibility claims.
 
-To update only one FrameXML flavor, run `./maintain-annotations.sh --flavor live` or `.\maintain-annotations.ps1 -Flavor live`. Ketho's shared annotations are also maintained by that run.
+To update only the Forever FrameXML worktree, run `./maintain-annotations.sh --flavor forever` or `.\maintain-annotations.ps1 -Flavor forever`. The default maintenance run updates all five worktrees. Forever uses the upstream [NumyAddon FramexmlAnnotations](https://github.com/NumyAddon/FramexmlAnnotations) `forever-mix-into-source` branch. Ketho's shared annotations are also maintained by each run.
 
 ## Install the optional skill
 
@@ -146,6 +148,8 @@ bun run build
 bun run check
 bun run test
 ```
+
+Run `mise run check` for repository lint and formatting. Markdown uses Markdownlint and Prettier; Biome's Markdown formatter is disabled to avoid conflicting skill-frontmatter changes.
 
 Restart your client's MCP connection to load the rebuilt server. If you installed the skill, refresh that copy with `./install.sh --force` or `.\install.ps1 -Force`. HTTP mode maintains annotations automatically. For stdio, update them with the maintenance script.
 

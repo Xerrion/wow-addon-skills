@@ -17,7 +17,7 @@ Deploy this repository with the Docker Compose build pack. The Bun server expose
    ```
 
 3. Assign the `wow-addon-mcp` service a domain using internal port `3000`, for example `https://wow-mcp.example.com:3000`, then deploy. The public MCP URL is `https://wow-mcp.example.com/mcp`. The port suffix in Coolify selects the container port; clients use the normal HTTPS URL.
-4. Wait for `/ready` to return HTTP `200`. The server downloads the shared API catalog and all four FrameXML flavors into the persistent volume automatically. Runtime logs show clone and update progress. During initial setup, `/health` stays available and authenticated MCP requests return `503` with a retry hint.
+4. Wait for `/ready` to return HTTP `200`. The server downloads the shared API catalog and all five FrameXML flavors, including the independent Forever worktree, into the persistent volume automatically. Runtime logs show clone and update progress. During initial setup, `/health` stays available and authenticated MCP requests return `503` with a retry hint.
 
 5. Print the finished settings from the container terminal:
 
@@ -31,7 +31,7 @@ Deploy this repository with the Docker Compose build pack. The Bun server expose
 
 The `annotations` volume is mounted at `/data`. The server runs as the unprivileged `bun` user. Shared API annotations live in `/data/annotations`; FrameXML worktrees live in `/data/framexml`. Keep these mount paths stable because Git worktree metadata records absolute paths. Container rebuilds preserve the volume. Back it up before removing the application or volume.
 
-`GET /health` returns HTTP `200` without authentication while the process is running. Its JSON reports `status`, annotation readiness, whether an update is running, the last successful refresh time in Unix milliseconds, and whether the latest update failed. `GET /ready` returns `503` until the required catalogs and all four flavor directories are populated, then `200`. The Docker image checks `/health` so the initial download can finish without a health-check restart. The Compose file exposes the application only to the container network; Coolify's proxy provides public access.
+`GET /health` returns HTTP `200` without authentication while the process is running. Its JSON reports `status`, annotation readiness, whether an update is running, the last successful refresh time in Unix milliseconds, and whether the latest update failed. `GET /ready` returns `503` until the required catalogs and all five flavor directories, including Forever, are populated, then `200`. The Docker image checks `/health` so the initial download can finish without a health-check restart. The Compose file exposes the application only to the container network; Coolify's proxy provides public access.
 
 ## Automatic annotation updates
 

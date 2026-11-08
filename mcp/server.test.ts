@@ -39,10 +39,20 @@ describe("local MCP server over stdio", { timeout: 20_000 }, () => {
     );
     const dataDir = join(annotations, "Annotations/Core/Data");
     const sourceDir = join(framexml, "live/Annotations/AddOns/Blizzard_Test");
+    const foreverSourceDir = join(
+      framexml,
+      "forever/Annotations/AddOns/Blizzard_ForeverTest",
+    );
+    const classicSourceDir = join(
+      framexml,
+      "classic_era/Annotations/AddOns/Blizzard_ClassicTest",
+    );
     await Promise.all([
       mkdir(apiDir, { recursive: true }),
       mkdir(dataDir, { recursive: true }),
       mkdir(sourceDir, { recursive: true }),
+      mkdir(foreverSourceDir, { recursive: true }),
+      mkdir(classicSourceDir, { recursive: true }),
     ]);
     await Promise.all([
       writeFile(
@@ -60,6 +70,18 @@ describe("local MCP server over stdio", { timeout: 20_000 }, () => {
       writeFile(
         join(sourceDir, "Main.xml.annotated.lua"),
         '<Frame name="NeedleXmlFrame"/>\n',
+      ),
+      writeFile(
+        join(foreverSourceDir, "Main.lua.annotated.lua"),
+        "local foreverMarker = true\nfunction ForeverNeedleFunction() end\n",
+      ),
+      writeFile(
+        join(foreverSourceDir, "Main.xml.annotated.lua"),
+        '<Frame name="ForeverNeedleXmlFrame"/>\n',
+      ),
+      writeFile(
+        join(classicSourceDir, "Main.lua.annotated.lua"),
+        "function ClassicNeedleFunction() end\n",
       ),
     ]);
 
@@ -134,6 +156,7 @@ describe("local MCP server over stdio", { timeout: 20_000 }, () => {
       "classic",
       "classic_anniversary",
       "classic_era",
+      "forever",
     ]);
     assert.equal(scope.default, "lua");
     assert.deepEqual(scope.enum, ["lua", "xml", "all"]);
@@ -222,6 +245,25 @@ describe("local MCP server over stdio", { timeout: 20_000 }, () => {
     });
     assert.ok(text(result).includes("NeedleFunction"));
     assert.ok(text(result).includes("NeedleXmlFrame"));
+  });
+
+  test("searches only Forever source and preserves its structured metadata", async () => {
+    const result = await client.callTool({
+      name: "wow-blizzard-source",
+      arguments: { pattern: "Needle", flavor: "forever", scope: "all" },
+    });
+    assert.ok(!result.isError);
+    assert.deepEqual(result.structuredContent, {
+      output: text(result),
+      metadata: { flavor: "forever", matchCount: 2, selfTruncated: false },
+    });
+    assert.ok(text(result).includes("ForeverNeedleFunction"));
+    assert.ok(text(result).includes("ForeverNeedleXmlFrame"));
+    assert.ok(text(result).includes("AddOns/Blizzard_ForeverTest/"));
+    assert.ok(text(result).includes("wow-framexml/forever/Annotations/"));
+    assert.ok(!text(result).includes("function NeedleFunction()"));
+    assert.ok(!text(result).includes("ClassicNeedleFunction"));
+    assert.ok(!text(result).includes(root));
   });
 
   test("returns a successful no-match result with zero matches", async () => {

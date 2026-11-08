@@ -53,8 +53,9 @@ $FlavorBranches = @{
     "classic"               = "classic-mix-into-source"
     "classic_era"           = "classic_era-mix-into-source"
     "classic_anniversary"   = "classic_anniversary-mix-into-source"
+    "forever"               = "forever-mix-into-source"
 }
-$AllFlavors = @("live", "classic", "classic_era", "classic_anniversary")
+$AllFlavors = @("live", "classic", "classic_era", "classic_anniversary", "forever")
 
 # -- Help -------------------------------------------------------------------
 
@@ -65,7 +66,7 @@ if ($Help) {
     Write-Host ""
     Write-Host "Parameters:" -ForegroundColor Yellow
     Write-Host "  -Flavor <name[]>  Specific flavors to update (default: all)"
-    Write-Host "                    Valid: live, classic, classic_era, classic_anniversary"
+    Write-Host "                    Valid: $($AllFlavors -join ', ')"
     Write-Host "  -Check            Validate paths and repositories without changing them"
     Write-Host "  -Help             Show this help message"
     Write-Host ""
@@ -369,6 +370,10 @@ function Update-Worktree {
 
     if ($isFirstRun) {
         Write-Host "  Creating worktree for '$FlavorName'..." -ForegroundColor Yellow
+        # Bare clones do not fetch local refs for branches added upstream later.
+        Invoke-GitCommand -Arguments @("fetch", "origin", "refs/heads/${BranchName}:refs/heads/${BranchName}") `
+            -WorkingDir $BareDir `
+            -Description "fetch branch $BranchName"
         Invoke-GitCommand -Arguments @("worktree", "add", $worktreeDir, $BranchName) `
             -WorkingDir $BareDir `
             -Description "create worktree $FlavorName"

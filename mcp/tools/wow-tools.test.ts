@@ -153,6 +153,71 @@ describe("wow-event-info", () => {
 });
 
 describe("wow-blizzard-source", () => {
+  test("keeps Forever and existing flavor searches isolated", async () => {
+    process.env.WOW_FRAMEXML_ROOT = root;
+    const flavors = [
+      "live",
+      "classic",
+      "classic_anniversary",
+      "classic_era",
+      "forever",
+    ] as const;
+    for (const flavor of flavors) {
+      const annotations = join(root, flavor, "Annotations");
+      await mkdir(annotations, { recursive: true });
+      await writeFile(
+        join(annotations, "Main.lua.annotated.lua"),
+        `function SharedNeedle() return "${flavor}Only" end\n`,
+      );
+    }
+    const tool = (await importFresh("./wow-blizzard-source.ts")).default;
+    for (const flavor of flavors) {
+      const result = await tool.execute({
+        pattern: "SharedNeedle",
+        flavor,
+        scope: "lua",
+      });
+      assert.deepEqual(result.metadata, {
+        flavor,
+        matchCount: 1,
+        selfTruncated: false,
+      });
+      assert.ok(result.output.includes(`return "${flavor}Only"`));
+      for (const other of flavors.filter((value) => value !== flavor)) {
+        assert.ok(!result.output.includes(`return "${other}Only"`));
+      }
+    }
+
+    const noMatch = await tool.execute({
+      pattern: 'return "liveOnly"',
+      flavor: "forever",
+      scope: "lua",
+    });
+    assert.deepEqual(noMatch.metadata, {
+      flavor: "forever",
+      matchCount: 0,
+      selfTruncated: false,
+    });
+    assert.ok(
+      noMatch.output.includes("No matches in wow-framexml/forever/Annotations/"),
+    );
+    assert.match(noMatch.output, /Try a different flavor \(.*\bforever\b/);
+  });
+
+  test("reports missing Forever source without falling back to live", async () => {
+    process.env.WOW_FRAMEXML_ROOT = root;
+    const live = join(root, "live/Annotations");
+    await mkdir(live, { recursive: true });
+    await writeFile(join(live, "Main.lua.annotated.lua"), "function Needle() end\n");
+    const tool = (await importFresh("./wow-blizzard-source.ts")).default;
+    await assert.rejects(
+      tool.execute({ pattern: "Needle", flavor: "forever", scope: "lua" }),
+      messageIncludes(
+        `flavor 'forever' not available at ${join(root, "forever/Annotations")}`,
+      ),
+    );
+  });
+
   test("reports capped matches without claiming an exact total", async () => {
     process.env.WOW_FRAMEXML_ROOT = root;
     const annotations = join(root, "live/Annotations");
@@ -329,6 +394,66 @@ describe("wow-wiki-fetch helpers", () => {
     const output = renderHtml(html);
     assert.equal(output, "Article body.");
     assert.ok(!output.includes("category"));
+  });
+
+  test("preserves empty table cells while skipping empty list and definition items", async () => {
+    const { renderHtml } = await importFresh("./wow-wiki-fetch.ts");
+    const output = renderHtml(
+      '<table><tr></tr><tr><th></th><th>Value</th></tr><tr><td>left|cell</td><td></td></tr></table><dl><dt></dt><dd></dd><dt>Term</dt><dd>Meaning</dd></dl><ul><li></li><li>Item</li></ul><ol><li></li><li>First</li></ol><h3><span class="mw-headline"></span></h3><p>After empty heading.</p><pre class="mw-highlight-lang-lua">print(&quot;ready&quot;)</pre><pre>untyped</pre>',
+    );
+    assert.equal(
+      output,
+      [
+        "|  | Value |\n| --- | --- |\n| left\\|cell |  |",
+        "**Term**\n: Meaning",
+        "- Item",
+        "1. First",
+        "###",
+        "After empty heading.",
+        '```lua\nprint("ready")\n```',
+        "```\nuntyped\n```",
+      ].join("\n\n"),
+    );
+  });
+
+  test("keeps empty anchored headings and multiple article section boundaries", async () => {
+    const tool = (await importFresh("./wow-wiki-fetch.ts")).default;
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          '<title>Sections - Warcraft Wiki</title><h1 id="firstHeading"></h1><div id="mw-content-text"><p>Lead.</p><h2><span class="mw-headline">Unanchored</span></h2><p>Still lead.</p><h2><span class="mw-headline" id="First"></span></h2><p>Empty-heading body.</p><h2><span class="mw-headline" id="Second">Second &amp; last</span></h2><p>Final body.</p></div><div id="catlinks"><a href="/wiki/Category:API_functions">API functions</a><a href="/wiki/Category:API_functions">Duplicate</a><a href="/wiki/Category:Caf%C3%A9">Café</a><a href="/wiki/Category:Bad%ZZ">Malformed</a></div>',
+        ),
+      ),
+    ) as unknown as typeof fetch;
+    const result = await tool.execute({ page: "Sections" });
+    assert.deepEqual(result.metadata.categories, ["API functions", "Café"]);
+    assert.ok(result.output.startsWith("# Sections\n"));
+    assert.ok(result.output.includes("> Categories: API functions, Café\n"));
+    assert.ok(
+      result.output.endsWith(
+        "Lead.\n\nUnanchored\n\nStill lead.\n\n## \n\nEmpty-heading body.\n\n## Second & last\n\nFinal body.\n\n",
+      ),
+    );
+  });
+
+  test("caps a multibyte article lead without splitting a character", async () => {
+    const tool = (await importFresh("./wow-wiki-fetch.ts")).default;
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(
+          `<h1 id="firstHeading">UTF8</h1><div id="mw-content-text"><p>${"😀".repeat(11_000)}</p></div>`,
+        ),
+      ),
+    ) as unknown as typeof fetch;
+    const result = await tool.execute({ page: "Utf8" });
+    assert.ok(Buffer.byteLength(result.output, "utf8") <= 40_000);
+    assert.ok(result.output.includes("😀".repeat(100)));
+    assert.ok(!result.output.includes("�"));
+    assert.ok(
+      result.output.endsWith(
+        "\n\n... article truncated at 40 KB; see https://warcraft.wiki.gg/wiki/Utf8 for the full page.\n",
+      ),
+    );
   });
 
   test("records only successful redirect metadata", async () => {

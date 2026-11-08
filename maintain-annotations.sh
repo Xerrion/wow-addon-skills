@@ -12,7 +12,7 @@ set -euo pipefail
 #   --check          Check destinations without downloading or changing files
 #   --help           Show this help message
 #
-# Supported flavors: live, classic, classic_era, classic_anniversary
+# Supported flavors: live, classic, classic_era, classic_anniversary, forever
 # ---------------------------------------------------------------------------
 
 # -- Colors -----------------------------------------------------------------
@@ -34,7 +34,7 @@ FRAMEXML_DIR="${WOW_FRAMEXML_ROOT:-${HOME}/.local/share/wow-framexml}"
 BARE_DIR="${FRAMEXML_DIR}/.bare"
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd -P)"
 
-ALL_FLAVORS=(live classic classic_era classic_anniversary)
+ALL_FLAVORS=(live classic classic_era classic_anniversary forever)
 
 # -- State ------------------------------------------------------------------
 
@@ -102,7 +102,7 @@ validate_flavors() {
 
 branch_for_flavor() {
     case "$1" in
-        live|classic|classic_era|classic_anniversary) printf '%s-mix-into-source\n' "$1" ;;
+        live|classic|classic_era|classic_anniversary|forever) printf '%s-mix-into-source\n' "$1" ;;
         *) return 1 ;;
     esac
 }
@@ -200,7 +200,7 @@ preflight() {
             [[ -e "$entry" || -L "$entry" ]] || continue
             [[ ! -L "$entry" ]] || fail "FrameXML data contains a symbolic link: ${entry}. Use a dedicated annotation directory."
             case "${entry##*/}" in
-                .bare|live|classic|classic_era|classic_anniversary|.DS_Store|Thumbs.db|desktop.ini) ;;
+                .bare|live|classic|classic_era|classic_anniversary|forever|.DS_Store|Thumbs.db|desktop.ini) ;;
                 *) fail "FrameXML data root contains unrelated files: ${entry}. Choose a dedicated empty directory or an existing FrameXML installation." ;;
             esac
         done
@@ -276,6 +276,8 @@ ensure_worktree() {
         UPDATED=$((UPDATED + 1))
     else
         printf '%s\n' "${DIM}  Creating ${flavor} worktree...${RESET}"
+        # Bare clones do not fetch local refs for branches added upstream later.
+        git -C "${BARE_DIR}" fetch origin "refs/heads/${branch}:refs/heads/${branch}"
         git -C "${BARE_DIR}" worktree add "${worktree_dir}" "${branch}"
         printf '%s\n' "${GREEN}✓${RESET} Created ${flavor} worktree (${branch})"
         CLONED=$((CLONED + 1))
